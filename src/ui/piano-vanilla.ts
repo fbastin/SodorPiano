@@ -10,6 +10,7 @@ export class SodorPiano {
   private soundType: SoundType = 'grand';
   private activeKeys: Set<number> = new Set();
   private isAutoPlaying = false;
+  private tempoMultiplier = 1.0;
   private stopAutoPlayRequested = false;
   private currentScore: MusicScore | null = null;
   private keyElements: Map<number, HTMLElement> = new Map();
@@ -47,11 +48,11 @@ export class SodorPiano {
     for (let i = 0; i < scoreToPlay.notes.length; i++) {
       if (this.stopAutoPlayRequested) break;
       const note = scoreToPlay.notes[i];
-      this.playNote(note.keyIndex, note.duration || 0.8);
+      this.playNote(note.keyIndex, (note.duration || 0.8) / this.tempoMultiplier);
 
       const nextNote = scoreToPlay.notes[i + 1];
       if (nextNote) {
-        const delay = (nextNote.time - note.time) * 1000;
+        const delay = (nextNote.time - note.time) * 1000 / this.tempoMultiplier;
         await new Promise<void>(resolve => {
             const timer = setTimeout(resolve, delay);
             const check = setInterval(() => {
@@ -252,6 +253,50 @@ export class SodorPiano {
         .sp-btn-exit:hover { background: #7f1d1d; }
         .sp-btn-exit svg { width: 16px; height: 16px; }
 
+        .sp-knob-group {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          border-left: 1px solid rgba(255,255,255,0.1);
+          padding-left: 16px;
+        }
+        .sp-knob-label {
+          font-size: 9px;
+          font-weight: 700;
+          color: #64748b;
+          text-transform: uppercase;
+          letter-spacing: 0.1em;
+          min-width: 32px;
+        }
+        .sp-knob-btn {
+          width: 24px;
+          height: 24px;
+          border-radius: 6px;
+          background: #1e293b;
+          color: #94a3b8;
+          border: 1px solid rgba(255,255,255,0.05);
+          cursor: pointer;
+          font-size: 16px;
+          font-weight: 700;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          transition: all 0.2s;
+          line-height: 1;
+          padding: 0;
+        }
+        .sp-knob-btn:hover {
+          background: #334155;
+          color: #e2e8f0;
+        }
+        .sp-knob-value {
+          font-size: 11px;
+          font-weight: 700;
+          color: #e2e8f0;
+          min-width: 36px;
+          text-align: center;
+        }
+
         /* Piano Bed */
         .sp-piano-bed {
           flex: 1;
@@ -368,7 +413,7 @@ export class SodorPiano {
           .sp-title { font-size: 16px; }
           .sp-piano-bed { padding: 4px 8px 8px; }
           .sp-footer { padding: 12px; gap: 24px; }
-          .sp-action-group { border-left: none; padding-left: 0; }
+          .sp-action-group, .sp-knob-group { border-left: none; padding-left: 0; }
         }
       </style>
       <div class="sp-root">
@@ -384,6 +429,18 @@ export class SodorPiano {
               <div class="sp-subtitle" id="sp-subtitle">Integrated Synthesis System</div>
               <div class="sp-controls-row">
                 <div class="sp-sound-btns" id="sp-sound-selector"></div>
+                <div class="sp-knob-group">
+                  <span class="sp-knob-label">Vol</span>
+                  <button class="sp-knob-btn" id="sp-vol-down">&minus;</button>
+                  <span class="sp-knob-value" id="sp-vol-value">80%</span>
+                  <button class="sp-knob-btn" id="sp-vol-up">+</button>
+                </div>
+                <div class="sp-knob-group">
+                  <span class="sp-knob-label">Tempo</span>
+                  <button class="sp-knob-btn" id="sp-tempo-down">&minus;</button>
+                  <span class="sp-knob-value" id="sp-tempo-value">1.0&times;</span>
+                  <button class="sp-knob-btn" id="sp-tempo-up">+</button>
+                </div>
                 <div class="sp-action-group">
                   <input type="file" id="sp-xml-import" style="display:none" accept=".musicxml,.xml">
                   <button class="sp-btn sp-btn-import" id="sp-import-btn">
@@ -458,6 +515,16 @@ export class SodorPiano {
 
     playBtn.onclick = () => this.playScore();
     stopBtn.onclick = () => this.stopScore();
+
+    const volDown = this.container.querySelector('#sp-vol-down') as HTMLButtonElement;
+    const volUp = this.container.querySelector('#sp-vol-up') as HTMLButtonElement;
+    const tempoDown = this.container.querySelector('#sp-tempo-down') as HTMLButtonElement;
+    const tempoUp = this.container.querySelector('#sp-tempo-up') as HTMLButtonElement;
+
+    volDown.onclick = () => { this.audio.volume = Math.round((this.audio.volume - 0.1) * 10) / 10; this.updateUI(); };
+    volUp.onclick = () => { this.audio.volume = Math.round((this.audio.volume + 0.1) * 10) / 10; this.updateUI(); };
+    tempoDown.onclick = () => { this.tempoMultiplier = Math.max(0.25, Math.round((this.tempoMultiplier - 0.25) * 4) / 4); this.updateUI(); };
+    tempoUp.onclick = () => { this.tempoMultiplier = Math.min(2.0, Math.round((this.tempoMultiplier + 0.25) * 4) / 4); this.updateUI(); };
   }
 
   private renderKeys() {
@@ -549,6 +616,11 @@ export class SodorPiano {
         ? `PLAYING: ${this.currentScore.title}`
         : `SCORE: ${this.currentScore.title}`;
     }
+
+    const volValue = this.container.querySelector('#sp-vol-value') as HTMLElement;
+    const tempoValue = this.container.querySelector('#sp-tempo-value') as HTMLElement;
+    if (volValue) volValue.textContent = `${Math.round(this.audio.volume * 100)}%`;
+    if (tempoValue) tempoValue.textContent = `${this.tempoMultiplier.toFixed(2).replace(/0$/, '')}×`;
 
     this.renderSoundSelector();
   }

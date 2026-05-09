@@ -91,17 +91,34 @@ export const SOUND_PRESETS: Record<SoundType, SoundPreset> = {
 
 export class PianoAudio {
   private ctx: AudioContext | null = null;
+  private masterGainNode: GainNode | null = null;
+  private _volume = 0.8;
+
+  get volume() { return this._volume; }
+  set volume(v: number) {
+    this._volume = Math.max(0, Math.min(1, v));
+    if (this.masterGainNode && this.ctx) {
+      this.masterGainNode.gain.setValueAtTime(this._volume, this.ctx.currentTime);
+    }
+  }
 
   constructor() {}
 
   private initCtx() {
     if (!this.ctx) {
       this.ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      this.masterGainNode = this.ctx.createGain();
+      this.masterGainNode.gain.setValueAtTime(this._volume, this.ctx.currentTime);
+      this.masterGainNode.connect(this.ctx.destination);
     }
     if (this.ctx.state === 'suspended') {
       this.ctx.resume();
     }
     return this.ctx;
+  }
+
+  private get output(): AudioNode {
+    return this.masterGainNode!;
   }
 
   getFrequency(keyIndex: number) {
@@ -130,9 +147,9 @@ export class PianoAudio {
         filter.frequency.exponentialRampToValueAtTime(preset.filterEndFreq, now + preset.decay);
       }
       masterGain.connect(filter);
-      filter.connect(ctx.destination);
+      filter.connect(this.output);
     } else {
-      masterGain.connect(ctx.destination);
+      masterGain.connect(this.output);
     }
 
     if (hasPerOscEnvelope) {
@@ -226,7 +243,7 @@ export class PianoAudio {
       Math.max(freq * 4, 1000), now + baseDecay * 0.5
     );
     soundboard.Q.setValueAtTime(0.5, now);
-    soundboard.connect(ctx.destination);
+    soundboard.connect(this.output);
 
     const masterGain = ctx.createGain();
     masterGain.gain.setValueAtTime(0.35, now);
