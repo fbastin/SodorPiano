@@ -89,10 +89,21 @@ export const SOUND_PRESETS: Record<SoundType, SoundPreset> = {
   }
 };
 
+interface ActiveVoice {
+  keyIndex: number;
+  gainNode: GainNode;
+  stopTime: number;
+  oscillators: OscillatorNode[];
+  sources: AudioBufferSourceNode[];
+}
+
 export class PianoAudio {
   private ctx: AudioContext | null = null;
   private masterGainNode: GainNode | null = null;
+  private compressor: DynamicsCompressorNode | null = null;
   private _volume = 0.8;
+  private activeVoices: ActiveVoice[] = [];
+  private readonly maxPolyphony = 32;
 
   get volume() { return this._volume; }
   set volume(v: number) {
@@ -109,7 +120,16 @@ export class PianoAudio {
       this.ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
       this.masterGainNode = this.ctx.createGain();
       this.masterGainNode.gain.setValueAtTime(this._volume, this.ctx.currentTime);
-      this.masterGainNode.connect(this.ctx.destination);
+
+      this.compressor = this.ctx.createDynamicsCompressor();
+      this.compressor.threshold.setValueAtTime(-18, this.ctx.currentTime);
+      this.compressor.knee.setValueAtTime(12, this.ctx.currentTime);
+      this.compressor.ratio.setValueAtTime(4, this.ctx.currentTime);
+      this.compressor.attack.setValueAtTime(0.003, this.ctx.currentTime);
+      this.compressor.release.setValueAtTime(0.15, this.ctx.currentTime);
+
+      this.masterGainNode.connect(this.compressor);
+      this.compressor.connect(this.ctx.destination);
     }
     if (this.ctx.state === 'suspended') {
       this.ctx.resume();
@@ -121,12 +141,44 @@ export class PianoAudio {
     return this.masterGainNode!;
   }
 
+  private dampVoice(voice: ActiveVoice, when: number) {
+    const fadeOut = 0.03;
+    voice.gainNode.gain.cancelScheduledValues(when);
+    voice.gainNode.gain.setValueAtTime(voice.gainNode.gain.value, when);
+    voice.gainNode.gain.exponentialRampToValueAtTime(0.0001, when + fadeOut);
+    voice.oscillators.forEach(o => { try { o.stop(when + fadeOut + 0.01); } catch (_) {} });
+    voice.sources.forEach(s => { try { s.stop(when + fadeOut + 0.01); } catch (_) {} });
+  }
+
+  private managePolyphony(ctx: AudioContext, keyIndex: number) {
+    const now = ctx.currentTime;
+
+    // Damp any existing voice on the same key
+    this.activeVoices = this.activeVoices.filter(v => {
+      if (v.keyIndex === keyIndex) {
+        this.dampVoice(v, now);
+        return false;
+      }
+      return true;
+    });
+
+    // Remove expired voices
+    this.activeVoices = this.activeVoices.filter(v => v.stopTime > now);
+
+    // If over polyphony limit, damp oldest voices
+    while (this.activeVoices.length >= this.maxPolyphony) {
+      const oldest = this.activeVoices.shift()!;
+      this.dampVoice(oldest, now);
+    }
+  }
+
   getFrequency(keyIndex: number) {
     return 27.5 * Math.pow(2, keyIndex / 12);
   }
 
   playNote(keyIndex: number, soundType: SoundType = 'grand', duration = 1.2) {
     const ctx = this.initCtx();
+    this.managePolyphony(ctx, keyIndex);
     if (soundType === 'grand') {
       this.playGrandPiano(ctx, keyIndex, duration);
       return;
@@ -226,15 +278,24 @@ export class PianoAudio {
     const now = ctx.currentTime;
     const freq = this.getFrequency(keyIndex);
     const t = keyIndex / 87;
+    const oscillators: OscillatorNode[] = [];
+    const sources: AudioBufferSourceNode[] = [];
+
+    const currentVoiceCount = this.activeVoices.length;
+    const densityFactor = currentVoiceCount > 16 ? 0.7 : currentVoiceCount > 8 ? 0.85 : 1.0;
 
     const B = 0.0001 + t * t * 0.004;
-    const baseDecay = 2.0 + 5.0 * Math.pow(1 - t, 1.8);
-    const numStrings = keyIndex < 10 ? 1 : keyIndex < 20 ? 2 : 3;
+    const fullBaseDecay = 2.0 + 5.0 * Math.pow(1 - t, 1.8);
+    const baseDecay = Math.min(fullBaseDecay, duration * 1.5 + 0.8);
+    const numStrings = duration < 0.3 || currentVoiceCount > 20 ? 1 : keyIndex < 10 ? 1 : keyIndex < 20 ? 2 : 3;
     const stringSpread = 0.3 + t * 1.0;
     const nyquist = ctx.sampleRate / 2;
-    const numHarmonics = Math.max(4, Math.min(12, Math.floor((nyquist - 200) / freq)));
-    const releaseTime = 1.5;
-    const stopTime = now + duration + releaseTime + 0.5;
+    const maxHarmonics = Math.max(4, Math.min(12, Math.floor((nyquist - 200) / freq)));
+    const numHarmonics = duration < 0.4 || currentVoiceCount > 16
+      ? Math.min(maxHarmonics, currentVoiceCount > 24 ? 4 : 6)
+      : maxHarmonics;
+    const releaseTime = Math.min(1.5, duration * 0.6 + 0.15);
+    const stopTime = now + duration + releaseTime + 0.1;
 
     const soundboard = ctx.createBiquadFilter();
     soundboard.type = 'lowpass';
@@ -246,8 +307,9 @@ export class PianoAudio {
     soundboard.connect(this.output);
 
     const masterGain = ctx.createGain();
-    masterGain.gain.setValueAtTime(0.35, now);
-    masterGain.gain.setValueAtTime(0.35, now + duration);
+    const peakLevel = (duration < 0.5 ? 0.35 * (0.6 + duration * 0.8) : 0.35) * densityFactor;
+    masterGain.gain.setValueAtTime(peakLevel, now);
+    masterGain.gain.setValueAtTime(peakLevel, now + duration);
     masterGain.gain.exponentialRampToValueAtTime(0.001, now + duration + releaseTime);
     masterGain.connect(soundboard);
 
@@ -281,13 +343,15 @@ export class PianoAudio {
         const promptLevel = amp * 0.65;
         const bodyLevel = Math.max(0.0001, amp * 0.05);
         const promptEnd = now + attack + promptTime;
-        const bodyEnd = Math.min(now + attack + hDecay, stopTime - 0.1);
+        const bodyEnd = Math.min(now + attack + hDecay, stopTime - 0.05);
 
         g.gain.setValueAtTime(0, now);
         g.gain.linearRampToValueAtTime(amp, now + attack);
-        g.gain.exponentialRampToValueAtTime(promptLevel, promptEnd);
-        if (bodyEnd > promptEnd + 0.02) {
-          g.gain.exponentialRampToValueAtTime(bodyLevel, bodyEnd);
+        if (promptEnd < stopTime - 0.05) {
+          g.gain.exponentialRampToValueAtTime(promptLevel, promptEnd);
+          if (bodyEnd > promptEnd + 0.02) {
+            g.gain.exponentialRampToValueAtTime(bodyLevel, bodyEnd);
+          }
         }
         g.gain.exponentialRampToValueAtTime(0.00001, stopTime);
 
@@ -295,6 +359,7 @@ export class PianoAudio {
         g.connect(stringGain);
         osc.start(now);
         osc.stop(stopTime);
+        oscillators.push(osc);
       }
     }
 
@@ -317,32 +382,46 @@ export class PianoAudio {
     clickGain.connect(masterGain);
     clickSrc.start(now);
     clickSrc.stop(now + 0.018);
+    sources.push(clickSrc);
 
-    // Hammer thump
-    const thumpLen = Math.floor(ctx.sampleRate * 0.030);
-    const thumpBuf = ctx.createBuffer(1, thumpLen, ctx.sampleRate);
-    const td = thumpBuf.getChannelData(0);
-    for (let j = 0; j < thumpLen; j++) td[j] = (Math.random() * 2 - 1) * Math.pow(1 - j / thumpLen, 2);
-    const thumpSrc = ctx.createBufferSource();
-    thumpSrc.buffer = thumpBuf;
-    const thumpBpf = ctx.createBiquadFilter();
-    thumpBpf.type = 'bandpass';
-    thumpBpf.frequency.setValueAtTime(Math.min(freq * 2, 2500), now);
-    thumpBpf.Q.setValueAtTime(0.6, now);
-    const thumpGain = ctx.createGain();
-    thumpGain.gain.setValueAtTime(0.06, now);
-    thumpGain.gain.exponentialRampToValueAtTime(0.001, now + 0.04);
-    thumpSrc.connect(thumpBpf);
-    thumpBpf.connect(thumpGain);
-    thumpGain.connect(masterGain);
-    thumpSrc.start(now);
-    thumpSrc.stop(now + 0.05);
+    // Hammer thump (skip for very short notes or dense passages)
+    if (duration >= 0.2 && currentVoiceCount < 16) {
+      const thumpLen = Math.floor(ctx.sampleRate * 0.030);
+      const thumpBuf = ctx.createBuffer(1, thumpLen, ctx.sampleRate);
+      const td = thumpBuf.getChannelData(0);
+      for (let j = 0; j < thumpLen; j++) td[j] = (Math.random() * 2 - 1) * Math.pow(1 - j / thumpLen, 2);
+      const thumpSrc = ctx.createBufferSource();
+      thumpSrc.buffer = thumpBuf;
+      const thumpBpf = ctx.createBiquadFilter();
+      thumpBpf.type = 'bandpass';
+      thumpBpf.frequency.setValueAtTime(Math.min(freq * 2, 2500), now);
+      thumpBpf.Q.setValueAtTime(0.6, now);
+      const thumpGain = ctx.createGain();
+      thumpGain.gain.setValueAtTime(0.06, now);
+      thumpGain.gain.exponentialRampToValueAtTime(0.001, now + 0.04);
+      thumpSrc.connect(thumpBpf);
+      thumpBpf.connect(thumpGain);
+      thumpGain.connect(masterGain);
+      thumpSrc.start(now);
+      thumpSrc.stop(now + 0.05);
+      sources.push(thumpSrc);
+    }
+
+    this.activeVoices.push({
+      keyIndex,
+      gainNode: masterGain,
+      stopTime,
+      oscillators,
+      sources
+    });
   }
   
   close() {
     if (this.ctx) {
+      this.activeVoices = [];
       this.ctx.close();
       this.ctx = null;
+      this.compressor = null;
     }
   }
 }
