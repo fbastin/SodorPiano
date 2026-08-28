@@ -1,0 +1,21 @@
+Salmander Grand Piano sample library
+=====================================
+
+The audio sample files in this directory (assets/samples/*.mp3) are taken
+from the "Salamander Grand Piano" sample library by Alessandro Iafrati,
+distributed under the Creative Commons Attribution 3.0 (CC-BY-3.0) license.
+
+  https://archive.org/details/SalamanderGrandPianoV3
+  License: https://creativecommons.org/licenses/by/3.0/
+
+A subset of the samples is used here: 30 recorded notes (A0, C1, D#1, F#1,
+A1, ... up to C8) x 3 velocity layers. The files were down-sampled/selected,
+tail-trimmed and re-encoded as MP3 for browser compatibility; the underlying
+recordings remain property of their author and are used under CC-BY-3.0.
+
+Note: because '#' is a URL fragment separator, sharp note names are stored
+with 's' (e.g. F#3 -> Fs3).
+
+Attribution: Alessandro Iafrati, "Salamander Grand Piano".
+
+All other code in this project is MIT licensed.

@@ -110,6 +110,74 @@ export class PianoAudio {
   private resonanceFeed: GainNode | null = null;
   private resonators: BiquadFilterNode[] = [];
   private readonly RES_FREQS = [55, 65.41, 77.78, 92.5, 110, 130.81, 155.56, 185, 220, 261.63, 311.13, 369.99, 440, 523.25, 622.25, 740, 880, 1046.5, 1244.5, 1480, 1760, 2093, 2489, 2960, 3520, 4186];
+  private sampleCache = new Map<string, AudioBuffer>();
+  private sampleLoads = new Map<string, Promise<AudioBuffer>>();
+
+  // Salamander Grand Piano (CC-BY 3.0 by Alessandro Iafrati, via archive.org).
+  // 30 recorded notes (A0, C1, ... every 3rd semitone) × 3 velocity layers
+  // (p/m/f). Each of the 88 keys picks the nearest recorded note and pitches it
+  // by at most ±1 semitone (playbackRate), which is inaudible.
+  private static readonly GRAND_SAMPLE_MAP: { note: string; rate: number }[] = [
+    { note: "A0", rate: 1.0 }, { note: "A0", rate: 1.059463 }, { note: "C1", rate: 0.943874 },
+    { note: "C1", rate: 1.0 }, { note: "C1", rate: 1.059463 }, { note: "D#1", rate: 0.943874 },
+    { note: "D#1", rate: 1.0 }, { note: "D#1", rate: 1.059463 }, { note: "F#1", rate: 0.943874 },
+    { note: "F#1", rate: 1.0 }, { note: "F#1", rate: 1.059463 }, { note: "A1", rate: 0.943874 },
+    { note: "A1", rate: 1.0 }, { note: "A1", rate: 1.059463 }, { note: "C2", rate: 0.943874 },
+    { note: "C2", rate: 1.0 }, { note: "C2", rate: 1.059463 }, { note: "D#2", rate: 0.943874 },
+    { note: "D#2", rate: 1.0 }, { note: "D#2", rate: 1.059463 }, { note: "F#2", rate: 0.943874 },
+    { note: "F#2", rate: 1.0 }, { note: "F#2", rate: 1.059463 }, { note: "A2", rate: 0.943874 },
+    { note: "A2", rate: 1.0 }, { note: "A2", rate: 1.059463 }, { note: "C3", rate: 0.943874 },
+    { note: "C3", rate: 1.0 }, { note: "C3", rate: 1.059463 }, { note: "D#3", rate: 0.943874 },
+    { note: "D#3", rate: 1.0 }, { note: "D#3", rate: 1.059463 }, { note: "F#3", rate: 0.943874 },
+    { note: "F#3", rate: 1.0 }, { note: "F#3", rate: 1.059463 }, { note: "A3", rate: 0.943874 },
+    { note: "A3", rate: 1.0 }, { note: "A3", rate: 1.059463 }, { note: "C4", rate: 0.943874 },
+    { note: "C4", rate: 1.0 }, { note: "C4", rate: 1.059463 }, { note: "D#4", rate: 0.943874 },
+    { note: "D#4", rate: 1.0 }, { note: "D#4", rate: 1.059463 }, { note: "F#4", rate: 0.943874 },
+    { note: "F#4", rate: 1.0 }, { note: "F#4", rate: 1.059463 }, { note: "A4", rate: 0.943874 },
+    { note: "A4", rate: 1.0 }, { note: "A4", rate: 1.059463 }, { note: "C5", rate: 0.943874 },
+    { note: "C5", rate: 1.0 }, { note: "C5", rate: 1.059463 }, { note: "D#5", rate: 0.943874 },
+    { note: "D#5", rate: 1.0 }, { note: "D#5", rate: 1.059463 }, { note: "F#5", rate: 0.943874 },
+    { note: "F#5", rate: 1.0 }, { note: "F#5", rate: 1.059463 }, { note: "A5", rate: 0.943874 },
+    { note: "A5", rate: 1.0 }, { note: "A5", rate: 1.059463 }, { note: "C6", rate: 0.943874 },
+    { note: "C6", rate: 1.0 }, { note: "C6", rate: 1.059463 }, { note: "D#6", rate: 0.943874 },
+    { note: "D#6", rate: 1.0 }, { note: "D#6", rate: 1.059463 }, { note: "F#6", rate: 0.943874 },
+    { note: "F#6", rate: 1.0 }, { note: "F#6", rate: 1.059463 }, { note: "A6", rate: 0.943874 },
+    { note: "A6", rate: 1.0 }, { note: "A6", rate: 1.059463 }, { note: "C7", rate: 0.943874 },
+    { note: "C7", rate: 1.0 }, { note: "C7", rate: 1.059463 }, { note: "D#7", rate: 0.943874 },
+    { note: "D#7", rate: 1.0 }, { note: "D#7", rate: 1.059463 }, { note: "F#7", rate: 0.943874 },
+    { note: "F#7", rate: 1.0 }, { note: "F#7", rate: 1.059463 }, { note: "A7", rate: 0.943874 },
+    { note: "A7", rate: 1.0 }, { note: "A7", rate: 1.059463 }, { note: "C8", rate: 0.943874 },
+    { note: "C8", rate: 1.0 },
+  ];
+
+  private get sampleBase(): string {
+    const b = (import.meta as any).env?.BASE_URL || '/SodorPiano/';
+    return b.replace(/\/$/, '') + '/assets/samples/';
+  }
+
+  private loadSample(ctx: AudioContext, file: string): Promise<AudioBuffer> {
+    const cached = this.sampleCache.get(file);
+    if (cached) return Promise.resolve(cached);
+    const inFlight = this.sampleLoads.get(file);
+    if (inFlight) return inFlight;
+    const p = fetch(this.sampleBase + file)
+      .then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.arrayBuffer();
+      })
+      .then(buf => ctx.decodeAudioData(buf))
+      .then(ab => {
+        this.sampleCache.set(file, ab);
+        this.sampleLoads.delete(file);
+        return ab;
+      })
+      .catch(err => {
+        this.sampleLoads.delete(file);
+        throw err;
+      });
+    this.sampleLoads.set(file, p);
+    return p;
+  }
 
   get pedal() { return this._pedalDown; }
   get canResonate() { return this._pedalDown || this.activeVoices.length > 0; }
@@ -249,7 +317,9 @@ export class PianoAudio {
     const ctx = this.initCtx();
     this.managePolyphony(ctx, keyIndex);
     if (soundType === 'grand') {
-      this.playGrandPiano(ctx, keyIndex, duration, velocity);
+      this.playGrandPiano(ctx, keyIndex, duration, velocity).catch(err =>
+        console.error('[SodorPiano] grand note error:', err)
+      );
       return;
     }
 
@@ -343,223 +413,118 @@ export class PianoAudio {
     });
   }
 
-  private playGrandPiano(ctx: AudioContext, keyIndex: number, duration: number, velocity = 0.9) {
-    const now = ctx.currentTime;
-    const freq = this.getFrequency(keyIndex);
-    const t = keyIndex / 87;
-    const oscillators: OscillatorNode[] = [];
-    const sources: AudioBufferSourceNode[] = [];
+  private async playGrandPiano(ctx: AudioContext, keyIndex: number, duration: number, velocity = 0.9) {
+    if (!this.ctx || this.ctx.state === 'closed') return;
+    const nodeCtx = this.ctx;
 
-    const currentVoiceCount = this.activeVoices.length;
-    const densityFactor = currentVoiceCount > 16 ? 0.7 : currentVoiceCount > 8 ? 0.85 : 1.0;
-
-    // ---- Velocity handling (acoustic behavior) ---------------------------
-    // Clamp and shape: velocity drives both loudness and brightness.
     const vel = Math.max(0.05, Math.min(1, velocity));
-    const velLin = Math.pow(vel, 1.6);                 // perceptual loudness
-    const bright = vel;                                // spectral brightness (0..1)
+    const entry = PianoAudio.GRAND_SAMPLE_MAP[keyIndex] || PianoAudio.GRAND_SAMPLE_MAP[39];
+    // Map velocity to a recorded layer: p (soft), m (medium), f (forte).
+    const layer = vel >= 0.75 ? 'f' : vel >= 0.4 ? 'm' : 'p';
+    // '#' is a URL fragment separator, so sharps are stored as 's' in filenames.
+    const noteSafe = entry.note.replace('#', 's');
+    const file = `${noteSafe}_${layer}.mp3`;
 
-    // ---- Pitch / inharmonicity (stretch) --------------------------------
-    // Octave stretching grows toward the treble; harder hits add a touch more.
-    const B = (0.0001 + t * t * 0.004) * (0.85 + 0.3 * bright);
-
-    // ---- Key-region decay behaviour -------------------------------------
-    // Lowest notes ring for many seconds; short treble notes decay fast.
-    const trebleDecay = 0.9 + (1 - t) * 4.5;           // long in bass, short in treble
-    const fullBaseDecay = trebleDecay * (0.75 + 0.5 * vel);
-    const baseDecay = Math.min(fullBaseDecay, duration * 1.5 + 1.2);
-
-    // Number of unison strings: bass gets 1-2, middle/treble 3, thinned under load.
-    const numStrings = duration < 0.3 || currentVoiceCount > 20 ? 1
-      : keyIndex < 10 ? 1 : keyIndex < 20 ? 2 : 3;
-    const stringSpread = 0.25 + t * 1.2;
-
-    const nyquist = ctx.sampleRate / 2;
-    const maxHarmonics = Math.max(4, Math.min(14, Math.floor((nyquist - 200) / freq)));
-    // Brighter strikes excite more partials.
-    const numHarmonics = duration < 0.4 || currentVoiceCount > 16
-      ? Math.min(maxHarmonics, Math.round(2 + 5 * bright))
-      : Math.round(3 + maxHarmonics * (0.45 + 0.55 * bright));
-
-    const releaseTime = Math.min(1.8, duration * 0.6 + 0.2 + 0.3 * vel);
-    const stopTime = now + duration + releaseTime + 0.1;
-
-    // ---- Output chain: soundboard (lowpass) + body resonance -------------
-    const soundboard = ctx.createBiquadFilter();
-    soundboard.type = 'lowpass';
-    // Don't cut off low bass; sweep down as the note decays (higher partials die first).
-    const sbStart = Math.min(freq * Math.min(16, 3 + 13 * bright), 12000);
-    soundboard.frequency.setValueAtTime(sbStart, now);
-    soundboard.frequency.exponentialRampToValueAtTime(
-      Math.max(freq * (2 + 2 * bright), 800), now + baseDecay * 0.6
-    );
-    if (t > 0.4) {
-      // Treble partials fade even faster than the sweep suggests — add a high-shelf tilt.
-      soundboard.Q.setValueAtTime(0.4 + t, now);
+    let buffer: AudioBuffer;
+    try {
+      buffer = await this.loadSample(nodeCtx, file);
+    } catch (err) {
+      console.error('[SodorPiano] failed to load sample', file, err);
+      this.playGrandSynthFallback(nodeCtx, keyIndex, duration, vel);
+      return;
     }
-    soundboard.connect(this.output);
 
-    // Body resonance: the instrument's low-end cabinet / belly response.
-    const body = ctx.createBiquadFilter();
+    // Re-read the clock after the async sample load so all scheduling uses a
+    // current timestamp (the one captured above may be stale by now).
+    const start = nodeCtx.currentTime;
+
+    const source = nodeCtx.createBufferSource();
+    source.buffer = buffer;
+    source.playbackRate.setValueAtTime(entry.rate, start);
+
+    const noteGain = nodeCtx.createGain();
+    // Layer + velocity level; slightly taper so very soft keystrokes stay soft.
+    const layerGain = layer === 'p' ? 0.7 : layer === 'm' ? 0.85 : 1.0;
+    const peak = layerGain * (0.55 + 0.45 * vel);
+    noteGain.gain.setValueAtTime(0, start);
+    noteGain.gain.linearRampToValueAtTime(peak, start + 0.003);
+
+    // Body resonance: samples are already full grands, just add a light presence
+    // boost and a gentle high-frequency roll-off towards the top to soften it.
+    const body = nodeCtx.createBiquadFilter();
     body.type = 'peaking';
-    const bodyFreq = freq < 200 ? 90 : freq < 400 ? 180 : freq < 900 ? 350 : 460;
-    body.frequency.setValueAtTime(bodyFreq, now);
-    body.Q.setValueAtTime(0.9, now);
-    body.gain.setValueAtTime(t < 0.5 ? 3 + 3 * (0.5 - t) : 2.5, now);
-    body.connect(soundboard);
+    const freq = this.getFrequency(keyIndex);
+    body.frequency.setValueAtTime(freq < 200 ? 120 : 420, start);
+    body.Q.setValueAtTime(0.8, start);
+    body.gain.setValueAtTime(freq < 200 ? 2.0 : 1.2, start);
 
-    const masterGain = ctx.createGain();
-    const peakLevel = (duration < 0.5 ? 0.35 * (0.55 + duration * 0.9) : 0.35)
-      * densityFactor * (0.3 + 0.7 * velLin);
-    masterGain.gain.setValueAtTime(0, now);
-    masterGain.gain.linearRampToValueAtTime(peakLevel, now + 0.003);
-    masterGain.gain.setValueAtTime(peakLevel, now + duration * 0.4);
-    masterGain.gain.setValueAtTime(peakLevel * 0.85, now + duration);
-    masterGain.gain.exponentialRampToValueAtTime(0.00001, now + duration + releaseTime);
-    // masterGain -> body -> soundboard -> output.
-    masterGain.connect(body);
+    source.connect(noteGain);
+    noteGain.connect(body);
+    body.connect(this.output);
 
-    // ---- Harmonic model --------------------------------------------------
-    // Amplitude profile of the fundamental and its partials, tilted by region & velocity.
-    const th = t;                       // 0 = low A0, 1 = high C8
-    const trebleCut = Math.min(1, Math.pow(th, 1.4));
-    const partialAmp = (h: number): number => {
-      // Real grands: fundamental dominates; upper partials fall off with distance.
-      // Bass has relatively strong low partials, treble is almost sinusoidal.
-      // 1st partial (fundamental) decays off toward treble relative to 2nd partial richness
-      let a: number;
-      if (h === 1) {
-        a = 1.0;
-      } else {
-        const falloff = 0.75 / Math.pow(h, 1.15);
-        a = falloff * (1 - 0.65 * trebleCut);
-      }
-      // Brightness: hard strikes boost upper partials (hammer hardens the contact).
-      a *= 0.25 + 0.75 * Math.pow(bright, 0.6) + (h > 1 ? 0.8 * bright : 0);
-      return Math.max(0.0001, a);
-    };
-
-    for (let s = 0; s < numStrings; s++) {
-      // Multiple strings of a unison are slightly de-tuned; high notes spread more.
-      const detuneCents =
-        numStrings === 1 ? 0
-        : numStrings === 2 ? (s - 0.5) * stringSpread
-        : (s - 1) * stringSpread;
-
-      const stringGain = ctx.createGain();
-      stringGain.gain.setValueAtTime(1.0 / numStrings, now);
-      stringGain.connect(masterGain);
-
-      const usedInharm = B * (1 + s * 0.002); // each unison string inharmonic differs slightly
-
-      for (let h = 1; h <= numHarmonics; h++) {
-        const partialFreq = h * freq * Math.sqrt(1 + usedInharm * h * h);
-        if (partialFreq >= nyquist - 100) break;
-
-        const osc = ctx.createOscillator();
-        const g = ctx.createGain();
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(partialFreq, now);
-        if (numStrings > 1) osc.detune.setValueAtTime(detuneCents, now);
-
-        const amp = partialAmp(h);
-        // Higher partials decay faster (loss at string terminations) — a real-piano trait.
-        const harmonicLoss = Math.pow(2, (h - 1) * (0.10 + 0.05 * trebleCut));
-        const hDecay = baseDecay / harmonicLoss;
-
-        // Attack: the hammer excites the partial almost instantly; a tiny prompt
-        // transient then falls to the inharmonic sustain body.
-        const attack = 0.0015;
-        const promptTime = Math.min(0.25, hDecay * 0.08) * (0.6 + 0.6 * vel);
-        const promptLevel = amp * (0.75 * bright + 0.2);
-        const bodyLevel = Math.max(0.0001, amp * 0.06);
-        const promptEnd = now + attack + promptTime;
-        const bodyEnd = Math.min(now + attack + hDecay, stopTime - 0.05);
-
-        g.gain.setValueAtTime(0, now);
-        g.gain.linearRampToValueAtTime(amp, now + attack);
-        if (promptEnd < stopTime - 0.05) {
-          g.gain.exponentialRampToValueAtTime(Math.max(promptLevel, 0.0001), promptEnd);
-          if (bodyEnd > promptEnd + 0.02) {
-            g.gain.exponentialRampToValueAtTime(bodyLevel, bodyEnd);
-          }
-        }
-        g.gain.exponentialRampToValueAtTime(0.00001, stopTime);
-
-        osc.connect(g);
-        g.connect(stringGain);
-        osc.start(now);
-        osc.stop(stopTime);
-        oscillators.push(osc);
-      }
-    }
-
-    // ---- Hammer attack transients ---------------------------------------
-    // Two noise bursts, mimicking the characteristic "thump + click" of the action.
-    // Click: broadband, low-level, brighter with harder strikes.
-    const clickLen = Math.floor(ctx.sampleRate * 0.010);
-    const clickBuf = ctx.createBuffer(1, clickLen, ctx.sampleRate);
-    const cd = clickBuf.getChannelData(0);
-    for (let j = 0; j < clickLen; j++) cd[j] = (Math.random() * 2 - 1) * (1 - j / clickLen);
-    const clickSrc = ctx.createBufferSource();
-    clickSrc.buffer = clickBuf;
-    const clickBpf = ctx.createBiquadFilter();
-    clickBpf.type = 'bandpass';
-    clickBpf.frequency.setValueAtTime(Math.min(freq * (3 + 3 * bright), 8500), now);
-    clickBpf.Q.setValueAtTime(1.0, now);
-    const clickGain = ctx.createGain();
-    clickGain.gain.setValueAtTime((0.02 + 0.05 * t) * (0.4 + vel), now);
-    clickGain.gain.exponentialRampToValueAtTime(0.001, now + 0.02);
-    clickSrc.connect(clickBpf);
-    clickBpf.connect(clickGain);
-    clickGain.connect(masterGain);
-    clickSrc.start(now);
-    clickSrc.stop(now + 0.022);
-    sources.push(clickSrc);
-
-    // Thump: low-frequency body thump of the key & felt hitting the string bed.
-    const thumpLen = Math.floor(ctx.sampleRate * 0.035);
-    const thumpBuf = ctx.createBuffer(1, thumpLen, ctx.sampleRate);
-    const td = thumpBuf.getChannelData(0);
-    const thumpBoost = currentVoiceCount < 16 && duration >= 0.18;
-    if (thumpBoost) {
-      for (let j = 0; j < thumpLen; j++) td[j] = (Math.random() * 2 - 1) * Math.pow(1 - j / thumpLen, 2);
-      const thumpSrc = ctx.createBufferSource();
-      thumpSrc.buffer = thumpBuf;
-      const thumpBpf = ctx.createBiquadFilter();
-      thumpBpf.type = 'bandpass';
-      thumpBpf.frequency.setValueAtTime(Math.min(freq * (1.6 + 0.8 * t), 2200), now);
-      thumpBpf.Q.setValueAtTime(0.6, now);
-      const thumpGain = ctx.createGain();
-      thumpGain.gain.setValueAtTime(0.05 * (0.5 + 0.5 * vel), now);
-      thumpGain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
-      thumpSrc.connect(thumpBpf);
-      thumpBpf.connect(thumpGain);
-      thumpGain.connect(masterGain);
-      thumpSrc.start(now);
-      thumpSrc.stop(now + 0.06);
-      sources.push(thumpSrc);
-    }
-
-    // ---- Sympathetic resonance ------------------------------------------
-    // When the pedal is down (or other notes are held), the played note's
-    // energy excites the undamped strings tuned to its related frequencies.
+    // Sympathetic resonance when pedal is down or other notes are ringing.
     if (this.canResonate && this.resonanceInput) {
-      const excite = ctx.createGain();
-      // Stronger excitation for louder notes and full chords.
-      excite.gain.setValueAtTime(0.25 * vel * (0.6 + 0.4 * bright), now);
-      excite.gain.exponentialRampToValueAtTime(0.0001, now + 0.15);
-      // Feed the partial-rich signal (pre soundboard/body colouring) into the bank.
-      masterGain.connect(excite);
+      const excite = nodeCtx.createGain();
+      excite.gain.setValueAtTime(0.18 * vel, start);
+      excite.gain.exponentialRampToValueAtTime(0.0001, start + 0.2);
+      noteGain.connect(excite);
       excite.connect(this.resonanceInput);
     }
 
+    // Natural playback length; let held notes ring out, cut short articulated ones.
+    const naturalDur = buffer.duration / entry.rate;
+    const held = duration >= 2.0;
+    const endTime = start + (held ? naturalDur : Math.max(0.05, duration));
+    const release = Math.min(0.8, Math.max(0.25, duration * 0.25));
+    const stopTime = endTime + release;
+
+    source.start(start);
+    noteGain.gain.exponentialRampToValueAtTime(0.0001, endTime + release);
+    source.stop(stopTime + 0.02);
+
+    this.activeVoices.push({
+      keyIndex,
+      gainNode: noteGain,
+      stopTime,
+      oscillators: [],
+      sources: [source],
+    });
+  }
+
+  // Emergency additive tone, only used if a sample fails to load so the app is
+  // never silent. Reasonably piano-ish harmonic stack.
+  private playGrandSynthFallback(ctx: AudioContext, keyIndex: number, duration: number, velocity = 0.9) {
+    const now = ctx.currentTime;
+    const freq = this.getFrequency(keyIndex);
+    const masterGain = ctx.createGain();
+    const vel = Math.max(0.05, Math.min(1, velocity));
+    const peak = 0.5 * (0.3 + 0.7 * vel);
+    masterGain.gain.setValueAtTime(0, now);
+    masterGain.gain.linearRampToValueAtTime(peak, now + 0.004);
+    masterGain.gain.exponentialRampToValueAtTime(0.0001, now + duration + 0.3);
+    masterGain.connect(this.output);
+    const oscillators: OscillatorNode[] = [];
+    const partials = [1, 2, 3, 4, 5];
+    const amps = [1, 0.45, 0.25, 0.14, 0.08];
+    for (let i = 0; i < partials.length; i++) {
+      const osc = ctx.createOscillator();
+      const g = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq * partials[i] * (1 + 0.0003 * partials[i] * partials[i]), now);
+      g.gain.setValueAtTime(amps[i] * (0.3 + 0.7 * vel), now);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + duration + 0.3);
+      osc.connect(g);
+      g.connect(masterGain);
+      osc.start(now);
+      osc.stop(now + duration + 0.35);
+      oscillators.push(osc);
+    }
     this.activeVoices.push({
       keyIndex,
       gainNode: masterGain,
-      stopTime,
+      stopTime: now + duration + 0.35,
       oscillators,
-      sources
+      sources: [],
     });
   }
   
