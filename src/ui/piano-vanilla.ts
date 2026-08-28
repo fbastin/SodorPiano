@@ -26,6 +26,10 @@ export class SodorPiano {
     this.updateUI();
   }
 
+  public setPedal(down: boolean) {
+    this.audio.setPedal(down);
+  }
+
   public async loadMusicXml(xmlString: string) {
     try {
       this.currentScore = parseMusicXml(xmlString);
@@ -48,13 +52,12 @@ export class SodorPiano {
     for (let i = 0; i < scoreToPlay.notes.length; i++) {
       if (this.stopAutoPlayRequested) break;
       const note = scoreToPlay.notes[i];
-      this.playNote(note.keyIndex, (note.duration || 0.8) / this.tempoMultiplier);
+      this.playNote(note.keyIndex, (note.duration || 0.8) / this.tempoMultiplier, 0.75);
 
       const nextNote = scoreToPlay.notes[i + 1];
       if (nextNote) {
         const delay = (nextNote.time - note.time) * 1000 / this.tempoMultiplier;
         await new Promise<void>(resolve => {
-            const timer = setTimeout(resolve, delay);
             const check = setInterval(() => {
                 if (this.stopAutoPlayRequested) {
                     clearTimeout(timer);
@@ -62,20 +65,26 @@ export class SodorPiano {
                     resolve();
                 }
             }, 50);
+            const timer = setTimeout(() => {
+                clearInterval(check);
+                resolve();
+            }, delay);
         });
       }
     }
 
     this.isAutoPlaying = false;
+    this.audio.dampAll();
     this.updateUI();
   }
 
   public stopScore() {
     this.stopAutoPlayRequested = true;
+    this.audio.dampAll();
   }
 
-  public playNote(keyIndex: number, duration = 2.5) {
-    this.audio.playNote(keyIndex, this.soundType, duration);
+  public playNote(keyIndex: number, duration = 2.5, velocity = 0.8) {
+    this.audio.playNote(keyIndex, this.soundType, duration, velocity);
     this.highlightKey(keyIndex);
   }
 
@@ -85,6 +94,14 @@ export class SodorPiano {
     const isBlack = el.classList.contains('sp-black-key');
     el.classList.add('sp-active');
     setTimeout(() => el.classList.remove('sp-active'), 250);
+  }
+
+  // Map a pointer's position within a key to a strike velocity.
+  // Striking the front (bottom) hard yields high velocity; grazing the top is soft.
+  private velocityFromPoint(clientY: number, rect: DOMRect) {
+    const ratio = (clientY - rect.top) / rect.height;
+    const v = 1 - Math.max(0, Math.min(1, ratio));
+    return Math.max(0.06, Math.min(1, v));
   }
 
   private render() {
@@ -234,6 +251,16 @@ export class SodorPiano {
           box-shadow: 0 4px 6px rgba(220,38,38,0.2);
         }
         .sp-btn-stop:hover { background: #ef4444; }
+        .sp-btn-pedal {
+          background: #1e293b;
+          color: #cbd5e1;
+        }
+        .sp-btn-pedal:hover { background: #334155; }
+        .sp-btn-pedal.sp-pedal-on {
+          background: #34d399;
+          color: #052e16;
+          box-shadow: 0 0 15px rgba(52,211,153,0.5);
+        }
         .sp-btn-exit {
           padding: 8px 24px;
           background: #1e293b;
@@ -443,6 +470,12 @@ export class SodorPiano {
                 </div>
                 <div class="sp-action-group">
                   <input type="file" id="sp-xml-import" style="display:none" accept=".musicxml,.xml">
+                  <button class="sp-btn sp-btn-pedal" id="sp-pedal-btn">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M4 10h16"/><path d="M6 10v6h4v-6"/><circle cx="18" cy="13" r="3"/><circle cx="18" cy="13" r="1" fill="currentColor" stroke="none"/>
+                    </svg>
+                    Pedal
+                  </button>
                   <button class="sp-btn sp-btn-import" id="sp-import-btn">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                       <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
@@ -516,6 +549,14 @@ export class SodorPiano {
     playBtn.onclick = () => this.playScore();
     stopBtn.onclick = () => this.stopScore();
 
+    const pedalBtn = this.container.querySelector('#sp-pedal-btn') as HTMLButtonElement;
+    pedalBtn.onclick = () => {
+      const next = !this.audio.pedal;
+      this.audio.setPedal(next);
+      pedalBtn.classList.toggle('sp-pedal-on', next);
+      pedalBtn.setAttribute('aria-pressed', String(next));
+    };
+
     const volDown = this.container.querySelector('#sp-vol-down') as HTMLButtonElement;
     const volUp = this.container.querySelector('#sp-vol-up') as HTMLButtonElement;
     const tempoDown = this.container.querySelector('#sp-tempo-down') as HTMLButtonElement;
@@ -553,8 +594,8 @@ export class SodorPiano {
     whiteKeys.forEach(key => {
       const el = document.createElement('div');
       el.className = 'sp-white-key';
-      el.onmousedown = () => this.playNote(key.i);
-      el.ontouchstart = (e) => { e.preventDefault(); this.playNote(key.i); };
+      el.onmousedown = (e: MouseEvent) => this.playNote(key.i, 2.5, this.velocityFromPoint(e.clientY, el.getBoundingClientRect()));
+      el.ontouchstart = (e: TouchEvent) => { e.preventDefault(); this.playNote(key.i, 2.5, this.velocityFromPoint(e.touches[0].clientY, el.getBoundingClientRect())); };
 
       if (key.noteName === 'C' || key.i === 0 || key.i === 87) {
         const label = document.createElement('div');
@@ -574,8 +615,8 @@ export class SodorPiano {
       const centerPercent = (key.whiteBefore / 52) * 100;
       el.style.left = `${centerPercent - blackKeyWidth / 2}%`;
       el.style.width = `${blackKeyWidth}%`;
-      el.onmousedown = () => this.playNote(key.i);
-      el.ontouchstart = (e) => { e.preventDefault(); this.playNote(key.i); };
+      el.onmousedown = (e: MouseEvent) => this.playNote(key.i, 2.5, this.velocityFromPoint(e.clientY, el.getBoundingClientRect()));
+      el.ontouchstart = (e: TouchEvent) => { e.preventDefault(); this.playNote(key.i, 2.5, this.velocityFromPoint(e.touches[0].clientY, el.getBoundingClientRect())); };
       keysBed.appendChild(el);
       this.keyElements.set(key.i, el);
     });
