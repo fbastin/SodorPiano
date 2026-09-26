@@ -138,10 +138,13 @@ export function playbackOrder(repeats: MeasureRepeat[]): number[] {
 /**
  * Measures `from` to `to` (excluded) in playing order.
  *
- * A repeat barline sends playback back to the last start-repeat barline, or
- * to the start of the section; `:|N` does so N - 1 times at most. Each
- * return counts one more pass through that repeat, and the pass selects the
- * voltas: a measure plays only if every volta over it lists the pass. A
+ * Repeat barlines pair up like brackets, so repeats may nest: `:|` returns
+ * to the start-repeat barline it closes, and the repeats inside are played
+ * again on every pass of the outer one. A `:|` left without its own `|:`
+ * returns to the last one met, or to the start of the section, as in
+ * MuseScore. `:|N` returns N - 1 times at most. Each return counts one
+ * more pass through that repeat, and the pass selects the voltas: a
+ * measure plays only if every volta over it lists the pass. A
  * volta that cannot play, with no repeat barline left after it, sends
  * playback to the next volta that can — or to the end of the section.
  *
@@ -159,8 +162,30 @@ function playSection(repeats: MeasureRepeat[], from: number, to: number): number
   const group = voltaGroups(covers);
   const used = new Map<number, number>();       // times each repeat barline was taken
   const jumpsTaken = new Set<number>();
-  let repeatStart = from;
-  let pass = 1;
+  const pairs = pairRepeats(repeats, from, to);
+  // Open repeats, innermost last, each with its pass. A repeat whose last
+  // pass is done stays on top for the voltas that follow it, until another
+  // one opens.
+  let frames: { start: number; pass: number; done: boolean }[] = [{ start: from, pass: 1, done: false }];
+  const top = () => frames[frames.length - 1];
+  // Where a `:|` without its own `|:` returns: the section start, or where
+  // a jump landed.
+  let restart = from;
+  // A volta group belongs to the repeat closed inside it (the first ending
+  // holds the `:|`): that repeat's pass picks the ending, even once other
+  // repeats have opened and closed around it.
+  const closingOf = new Map<number, number | null>();   // volta group → start of its repeat
+  group.forEach((g, k) => {
+    if (g && !closingOf.has(g) && repeats[from + k].backward > 0) closingOf.set(g, pairs.get(from + k)!.start);
+  });
+  const owner = group.map(g => (closingOf.has(g) ? closingOf.get(g) : undefined));
+  const passAt = (i: number) => {
+    const o = owner[i - from];
+    if (o === undefined) return top().pass;
+    const start = o ?? restart;
+    for (let k = frames.length - 1; k >= 0; k--) if (frames[k].start === start) return frames[k].pass;
+    return top().pass;
+  };
   let road: { from: number; until: number | null; coda: number | null; playRepeats: boolean } | null = null;
 
   // Markers are looked for in this section only.
@@ -179,6 +204,7 @@ function playSection(repeats: MeasureRepeat[], from: number, to: number): number
       const b = repeats[j].backward;
       if (b > 0) passesLeft += Math.max(0, b - 1 - (used.get(j) ?? 0));
     }
+    const pass = top().pass;
     for (let p = pass + 1; p <= pass + passesLeft; p++) if (plays(i, p)) return true;
     return false;
   };
@@ -190,13 +216,13 @@ function playSection(repeats: MeasureRepeat[], from: number, to: number): number
     // past the jump.
     const finalEnding = !repeatsOn || (road && !road.playRepeats && group[i - from] > 0
       && group[i - from] === group[road.from - from]);
-    const volta = finalEnding ? lastEnding[i - from] : pass;
+    const volta = finalEnding ? lastEnding[i - from] : passAt(i);
     // A start-repeat barline opens a new repeat — once the volta that may
     // begin on the same measure has been chosen with the pass it closes.
-    const opens = repeatsOn && r.forward && i !== repeatStart;
+    const opens = repeatsOn && r.forward && top().start !== i;
     if (opens && plays(i, volta)) {
-      repeatStart = i;
-      pass = 1;
+      while (frames.length > 1 && top().done) frames.pop();
+      frames.push({ start: i, pass: 1, done: false });
     }
     if (!plays(i, volta)) {
       if (!repeatsOn || endRepeatFrom(i)) { i++; continue; }
@@ -212,8 +238,8 @@ function playSection(repeats: MeasureRepeat[], from: number, to: number): number
       if (road.coda === null) break;
       i = road.coda;
       road = null;
-      repeatStart = i;
-      pass = 1;
+      restart = i;
+      frames = [{ start: i, pass: 1, done: false }];
       continue;
     }
 
@@ -238,27 +264,67 @@ function playSection(repeats: MeasureRepeat[], from: number, to: number): number
         };
         if (jump.playRepeats) used.clear();
         i = target;
+        // Repeats played again return, without their own `|:`, to the
+        // section start as usual; otherwise only repeats past the jump
+        // play, and they return to where it landed.
+        restart = jump.playRepeats ? from : target;
+        frames = [{ start: restart, pass: 1, done: false }];
         // With repeats played, the repeat in force is the last one opened
         // before the target.
-        repeatStart = target;
         if (jump.playRepeats) {
-          while (repeatStart > from && !repeats[repeatStart].forward) repeatStart--;
+          let open = target;
+          while (open > from && !repeats[open].forward) open--;
+          if (repeats[open].forward) frames.push({ start: open, pass: 1, done: false });
         }
-        pass = 1;
         continue;
       }
     }
 
-    if (repeatsOn && r.backward > 0 && (used.get(i) ?? 0) < r.backward - 1) {
-      used.set(i, (used.get(i) ?? 0) + 1);
-      pass++;
-      i = repeatStart;
-      continue;
+    if (repeatsOn && r.backward > 0) {
+      const pair = pairs.get(i)!;
+      const start = pair.start ?? restart;
+      let k = frames.map(f => f.start).lastIndexOf(start);
+      if (k < 0) {
+        frames.push({ start, pass: 1, done: false });
+        k = frames.length - 1;
+      }
+      frames = frames.slice(0, k + 1);   // repeats opened inside are over
+      if ((used.get(i) ?? 0) < r.backward - 1) {
+        used.set(i, (used.get(i) ?? 0) + 1);
+        top().pass++;
+        top().done = false;
+        // A repeat nested inside plays again on the next pass.
+        if (pair.nested) for (let m = start + 1; m < i; m++) used.delete(m);
+        i = start;
+        continue;
+      }
+      top().done = true;
     }
 
     i++;
   }
   return order;
+}
+
+// Pairs each repeat barline with the start-repeat barline it closes, like
+// brackets. One left without its own (`|: :| :|`) returns to the last
+// start-repeat barline met, or to the section start (start null), and
+// leaves the repeats inside alone: that is how MuseScore plays it.
+function pairRepeats(repeats: MeasureRepeat[], from: number, to: number) {
+  const pairs = new Map<number, { start: number | null; nested: boolean }>();
+  const open: number[] = [];
+  let lastStart: number | null = null;
+  for (let i = from; i < to; i++) {
+    if (repeats[i].forward) {
+      open.push(i);
+      lastStart = i;
+    }
+    if (repeats[i].backward > 0) {
+      const start = open.pop();
+      pairs.set(i, start !== undefined ? { start, nested: true } : { start: lastStart, nested: false });
+    }
+  }
+  return pairs;
 }
 
 // For each measure of the section, the endings of every volta over it.
