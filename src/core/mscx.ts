@@ -1,5 +1,5 @@
 import { MusicScore } from '../types';
-import { MeasureData, MeasureNote, MeasureRepeat, buildScore, dynamicMark, emptyMeasure, noRepeat } from './timeline';
+import { MeasureData, MeasureNote, MeasureRepeat, buildScore, dynamicMark, emptyMeasure, noRepeat, playbackOrder } from './timeline';
 
 // Native MuseScore format (.mscx, and the .mscx inside a .mscz archive), as
 // written by MuseScore 2, 3 and 4. Unlike MusicXML it stores MIDI pitches and
@@ -37,6 +37,19 @@ const fractionBeats = (text: string | undefined): number => {
 };
 
 export const parseMscx = (xmlString: string): MusicScore => {
+  const { score, staffElements, staves, partOf } = readScore(xmlString);
+  // Staves of the same instrument (the two staves of a piano) share their
+  // dynamics and pedal marks.
+  const division = Number(childText(score, 'Division')) || 480;
+  return buildScore(scoreTitle(score), staves.map(m => parseStaff(m, division)), parseRepeats(staves),
+                    staffElements.map((s, i) => partOf.get(s.getAttribute('id') ?? '') ?? -1 - i));
+};
+
+/** Measures in the order they are played (indices from 0), for checking. */
+export const mscxMeasureOrder = (xmlString: string): number[] =>
+  playbackOrder(parseRepeats(readScore(xmlString).staves));
+
+function readScore(xmlString: string) {
   const doc = new DOMParser().parseFromString(xmlString, 'text/xml');
   if (doc.querySelector('parsererror')) throw new Error('The file is not valid XML');
 
@@ -56,13 +69,8 @@ export const parseMscx = (xmlString: string): MusicScore => {
   const staffElements = children(score, 'Staff')
     .filter(s => !percussion.has(s.getAttribute('id') ?? ''));
   const staves = staffElements.map(s => children(s, 'Measure'));
-
-  // Staves of the same instrument (the two staves of a piano) share their
-  // dynamics and pedal marks.
-  const division = Number(childText(score, 'Division')) || 480;
-  return buildScore(scoreTitle(score), staves.map(m => parseStaff(m, division)), parseRepeats(staves),
-                    staffElements.map((s, i) => partOf.get(s.getAttribute('id') ?? '') ?? -1 - i));
-};
+  return { score, staffElements, staves, partOf };
+}
 
 function scoreTitle(score: Element): string {
   const meta = children(score, 'metaTag').find(m => m.getAttribute('name') === 'workTitle');
@@ -364,40 +372,65 @@ function parseRepeats(staves: Element[][]): MeasureRepeat[] {
   const repeats = Array.from({ length: count }, noRepeat);
 
   for (const measures of staves) {
-    const openVoltas = new Map<string, { start: number; endings: number[] }>();
+    const openVoltas = new Map<string, { start: number; endings: number[]; isOpen: boolean }>();
     measures.forEach((measure, i) => {
       if (child(measure, 'startRepeat')) repeats[i].forward = true;
       const end = child(measure, 'endRepeat');
       if (end) repeats[i].backward = parseInt(end.textContent ?? '', 10) || 2;
+
+      // Road map: segno, coda, fine… markers, and D.C. / D.S. jumps, all
+      // referring to each other by label.
+      for (const marker of children(measure, 'Marker')) {
+        const label = childText(marker, 'label');
+        if (label && !repeats[i].markers.includes(label)) repeats[i].markers.push(label);
+      }
+      const jump = child(measure, 'Jump');
+      if (jump && childText(jump, 'jumpTo')) {
+        repeats[i].jump = {
+          to: childText(jump, 'jumpTo')!,
+          until: childText(jump, 'playUntil') || 'end',
+          continueAt: childText(jump, 'continueAt') ?? '',
+          playRepeats: childText(jump, 'playRepeats') === '1',
+        };
+      }
 
       // MuseScore 3.0 files: <Volta id="…"> closed by <endSpanner id="…"/>.
       // An end written before the first note of a measure leaves that
       // measure out of the volta.
       for (const el of children(measure)) {
         if (el.tagName === 'Volta' && el.getAttribute('id')) {
-          openVoltas.set(el.getAttribute('id')!, { start: i, endings: voltaEndings(el) });
+          openVoltas.set(el.getAttribute('id')!, { start: i, endings: voltaEndings(el), isOpen: voltaIsOpen(el) });
         }
         const open = el.tagName === 'endSpanner' ? openVoltas.get(el.getAttribute('id') ?? '') : undefined;
         if (open) {
           openVoltas.delete(el.getAttribute('id')!);
           const beforeNotes = !children(measure).slice(0, children(measure).indexOf(el))
             .some(c => c.tagName === 'Chord' || c.tagName === 'Rest');
-          for (let k = open.start; k < (beforeNotes ? i : i + 1); k++) repeats[k].endings = open.endings;
+          const length = (beforeNotes ? i : i + 1) - open.start;
+          if (length > 0) repeats[open.start].voltas.push({ endings: open.endings, length, open: open.isOpen });
         }
       }
 
       for (const spanner of Array.from(measure.querySelectorAll(':scope > voice > Spanner[type="Volta"], :scope > Spanner[type="Volta"]'))) {
         const volta = child(spanner, 'Volta');
         if (!volta) continue;   // the closing half of the spanner
-        const endings = voltaEndings(volta);
         const loc = child(child(spanner, 'next') ?? spanner, 'location');
-        const span = Math.max(1, Number(loc && childText(loc, 'measures')) || 1);
-        for (let k = i; k < Math.min(count, i + span); k++) repeats[k].endings = endings;
+        const length = Math.max(1, Number(loc && childText(loc, 'measures')) || 1);
+        repeats[i].voltas.push({ endings: voltaEndings(volta), length, open: voltaIsOpen(volta) });
+      }
+
+      // A section break — on the measure, or on a frame before the next
+      // measure — ends a section: numbering, repeats and jumps start afresh.
+      for (let el: Element | null = measure; el && (el === measure || el.tagName !== 'Measure'); el = el.nextElementSibling) {
+        if (children(el, 'LayoutBreak').some(b => childText(b, 'subtype') === 'section')) repeats[i].sectionEnd = true;
       }
     });
   }
   return repeats;
 }
+
+// A volta without a closing hook is open: it runs on to what follows.
+const voltaIsOpen = (volta: Element): boolean => childText(volta, 'endHookType') !== '1';
 
 const voltaEndings = (volta: Element): number[] =>
   (childText(volta, 'endings') ?? '1').split(/[\s,]+/).map(n => parseInt(n, 10)).filter(n => n > 0);

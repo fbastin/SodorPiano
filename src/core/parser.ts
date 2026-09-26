@@ -172,15 +172,20 @@ function articulation(note: Element): Pick<MeasureNote, 'held' | 'accent'> {
   return result;
 }
 
-// Repeat barlines and volta brackets. Parts repeat the same structure, so the
-// first part is read for all of them.
+// Repeat barlines, volta brackets and the road map (segno, coda, fine,
+// D.C., D.S.). Parts repeat the same structure, so the first part is read
+// for all of them.
 function parseRepeats(measures: Element[]): MeasureRepeat[] {
-  let openEnding: number[] | null = null;
+  const repeats = measures.map(() => noRepeat());
+  let open: { start: number; endings: number[] } | null = null;
+  const closeVolta = (end: number, isOpen: boolean) => {
+    if (!open) return;
+    repeats[open.start].voltas.push({ endings: open.endings, length: end - open.start + 1, open: isOpen });
+    open = null;
+  };
 
-  return measures.map(measure => {
-    const r = noRepeat();
-    r.endings = openEnding;
-
+  measures.forEach((measure, i) => {
+    const r = repeats[i];
     for (const barline of Array.from(measure.querySelectorAll(':scope > barline'))) {
       const repeat = barline.querySelector('repeat');
       if (repeat?.getAttribute('direction') === 'forward') r.forward = true;
@@ -190,16 +195,50 @@ function parseRepeats(measures: Element[]): MeasureRepeat[] {
 
       const ending = barline.querySelector('ending');
       if (!ending) continue;
-      if (ending.getAttribute('type') === 'start') {
-        openEnding = (ending.getAttribute('number') ?? '1')
-          .split(/[\s,]+/).map(n => parseInt(n, 10)).filter(n => n > 0);
-        r.endings = openEnding;
+      const type = ending.getAttribute('type');
+      if (type === 'start') {
+        closeVolta(i - 1, false);
+        open = {
+          start: i,
+          endings: (ending.getAttribute('number') ?? '1')
+            .split(/[\s,]+/).map(n => parseInt(n, 10)).filter(n => n > 0),
+        };
       } else {
-        // "stop" or "discontinue": this measure is the last of the volta.
-        r.endings = r.endings ?? openEnding;
-        openEnding = null;
+        // "stop" (closing hook) or "discontinue" (open end): this measure
+        // is the last of the volta.
+        closeVolta(i, type === 'discontinue');
       }
     }
-    return r;
+
+    // <sound> carries the road map, wherever it stands in the measure.
+    for (const sound of Array.from(measure.querySelectorAll('sound'))) {
+      const segno = sound.getAttribute('segno');
+      const coda = sound.getAttribute('coda');
+      const toCoda = sound.getAttribute('tocoda');
+      if (segno !== null) r.markers.push(`segno:${segno}`);
+      if (coda !== null) r.markers.push(`coda:${coda}`);
+      if (toCoda !== null) r.markers.push(`tocoda:${toCoda}`);
+      if (sound.getAttribute('fine') !== null) r.markers.push('fine');
+      const dalSegno = sound.getAttribute('dalsegno');
+      if (sound.getAttribute('dacapo') === 'yes' || dalSegno !== null) {
+        r.jump = { to: dalSegno !== null ? `segno:${dalSegno}` : 'start', until: 'end', continueAt: '', playRepeats: false };
+      }
+    }
   });
+  closeVolta(measures.length - 1, true);
+
+  // MusicXML does not say where a D.C. or D.S. stops: at a To Coda if the
+  // score has one — continuing at the coda of the same name — or at Fine.
+  const toCoda = repeats.flatMap(r => r.markers).find(m => m.startsWith('tocoda:'));
+  const fine = repeats.some(r => r.markers.includes('fine'));
+  for (const r of repeats) {
+    if (!r.jump) continue;
+    if (toCoda) {
+      r.jump.until = toCoda;
+      r.jump.continueAt = `coda:${toCoda.slice('tocoda:'.length)}`;
+    } else if (fine) {
+      r.jump.until = 'fine';
+    }
+  }
+  return repeats;
 }

@@ -54,10 +54,32 @@ export const emptyMeasure = (): MeasureData =>
 export interface MeasureRepeat {
   forward: boolean;          // a repeat section starts here
   backward: number;          // total times the section is played; 0 if none
-  endings: number[] | null;  // volta numbers this measure belongs to
+  voltas: Volta[];           // voltas starting in this measure
+  markers: string[];         // road-map signs in this measure: segno, coda, fine…
+  jump: MeasureJump | null;  // D.C. or D.S., taken at the end of the measure
+  sectionEnd: boolean;       // a section break follows: the next measure starts afresh
 }
 
-export const noRepeat = (): MeasureRepeat => ({ forward: false, backward: 0, endings: null });
+// A volta bracket over `length` measures. An open one (no closing hook)
+// runs on to the next volta, through the next repeat barline, or to the end
+// of the section.
+export interface Volta {
+  endings: number[];
+  length: number;
+  open: boolean;
+}
+
+// A jump names markers by label. "start" is the beginning of the score and
+// "end" its end; an empty continueAt means no coda.
+export interface MeasureJump {
+  to: string;
+  until: string;
+  continueAt: string;
+  playRepeats: boolean;      // repeats are played again after the jump
+}
+
+export const noRepeat = (): MeasureRepeat =>
+  ({ forward: false, backward: 0, voltas: [], markers: [], jump: null, sectionEnd: false });
 
 // Velocity when the score has no dynamic mark yet: mezzo-forte.
 const DEFAULT_VELOCITY = 80 / 127;
@@ -95,60 +117,186 @@ export function dynamicMark(name: string, offset: number, midiVelocity?: number)
 }
 
 /**
- * Order in which measures are played, repeats and voltas unrolled.
+ * Order in which measures are played, repeats, voltas and jumps unrolled,
+ * following MuseScore's rules.
  *
- * A pass counter selects the volta: on the second pass through a section,
- * measures of ending "1" are skipped and those of ending "2" played. Once
- * the section's last repeat is done, the counter keeps its final value for
- * the voltas that follow, and returns to 1 at the first measure outside
- * them, where the next section begins. A repeat barline inside a volta
- * jumps back to the start of the section, like any other.
- *
- * Each repeat barline is taken at most its written number of times, which
- * guarantees that playback ends. Nested repeats and jumps (D.C., D.S.,
- * coda) are not handled.
+ * Sections (separated by section breaks) are played one after the other,
+ * each on its own: repeats and jumps never leave their section.
  */
 export function playbackOrder(repeats: MeasureRepeat[]): number[] {
   const order: number[] = [];
-  const timesPlayed = new Map<number, number>();
-  let sectionStart = 0;
+  let start = 0;
+  repeats.forEach((r, i) => {
+    if (r.sectionEnd || i === repeats.length - 1) {
+      order.push(...playSection(repeats, start, i + 1));
+      start = i + 1;
+    }
+  });
+  return order.slice(0, MAX_PLAYED_MEASURES);
+}
+
+/**
+ * Measures `from` to `to` (excluded) in playing order.
+ *
+ * A repeat barline sends playback back to the last start-repeat barline, or
+ * to the start of the section; `:|N` does so N - 1 times at most. Each
+ * return counts one more pass through that repeat, and the pass selects the
+ * voltas: a measure plays only if every volta over it lists the pass. A
+ * volta that cannot play, with no repeat barline left after it, sends
+ * playback to the next volta that can — or to the end of the section.
+ *
+ * A jump (D.C., D.S.) is taken once, on the last pass through its measure.
+ * Playback then goes on until the marker it names — Fine, where the section
+ * ends, or To Coda, where it continues at the coda. Unless the jump says
+ * otherwise, the repeats of the stretch played again are not taken, and
+ * each group of voltas there gives only its last ending; past the jump,
+ * repeats play as usual.
+ */
+function playSection(repeats: MeasureRepeat[], from: number, to: number): number[] {
+  const order: number[] = [];
+  const covers = voltaCoverage(repeats, from, to);
+  const lastEnding = covers.map((_, k) => groupLastEnding(covers, k));
+  const group = voltaGroups(covers);
+  const used = new Map<number, number>();       // times each repeat barline was taken
+  const jumpsTaken = new Set<number>();
+  let repeatStart = from;
   let pass = 1;
-  let repeatDone = false;   // past a repeat barline that will not be taken again
+  let road: { from: number; until: number | null; coda: number | null; playRepeats: boolean } | null = null;
 
-  for (let i = 0; i < repeats.length && order.length < MAX_PLAYED_MEASURES; ) {
+  // Markers are looked for in this section only.
+  const markers = (label: string) => {
+    const found: number[] = [];
+    for (let m = from; m < to; m++) if (repeats[m].markers.includes(label)) found.push(m);
+    return found;
+  };
+  const endRepeatFrom = (i: number) => repeats.slice(i, to).some(r => r.backward > 0);
+  const plays = (k: number, volta: number) => covers[k - from].every(e => e.includes(volta));
+  // Whether the repeat barlines still to come will bring playback back
+  // through measure i: then this is not the last pass through it.
+  const comesBack = (i: number) => {
+    let passesLeft = 0;
+    for (let j = i; j < to && (j === i || !repeats[j].forward); j++) {
+      const b = repeats[j].backward;
+      if (b > 0) passesLeft += Math.max(0, b - 1 - (used.get(j) ?? 0));
+    }
+    for (let p = pass + 1; p <= pass + passesLeft; p++) if (plays(i, p)) return true;
+    return false;
+  };
+
+  for (let i = from; i < to && order.length < MAX_PLAYED_MEASURES; ) {
     const r = repeats[i];
-
-    if (repeatDone && !r.endings) {
-      sectionStart = i;
+    const repeatsOn = !road || road.playRepeats || i > road.from;
+    // The volta group holding the jump gives its last ending too, even
+    // past the jump.
+    const finalEnding = !repeatsOn || (road && !road.playRepeats && group[i - from] > 0
+      && group[i - from] === group[road.from - from]);
+    const volta = finalEnding ? lastEnding[i - from] : pass;
+    // A start-repeat barline opens a new repeat — once the volta that may
+    // begin on the same measure has been chosen with the pass it closes.
+    const opens = repeatsOn && r.forward && i !== repeatStart;
+    if (opens && plays(i, volta)) {
+      repeatStart = i;
       pass = 1;
-      repeatDone = false;
     }
-    // A start-repeat barline opens a new section, unless playback has just
-    // jumped back to it.
-    if (r.forward && i !== sectionStart) {
-      sectionStart = i;
+    if (!plays(i, volta)) {
+      if (!repeatsOn || endRepeatFrom(i)) { i++; continue; }
+      let next = i + 1;
+      while (next < to && !(covers[next - from].length && plays(next, volta))) next++;
+      i = next;
+      continue;
+    }
+    order.push(i);
+
+    // The end of the road after a jump: Fine, or To Coda.
+    if (road && road.until === i && !(repeatsOn && comesBack(i))) {
+      if (road.coda === null) break;
+      i = road.coda;
+      road = null;
+      repeatStart = i;
       pass = 1;
+      continue;
     }
 
-    const skipped = r.endings !== null && !r.endings.includes(pass);
-    if (!skipped) order.push(i);
-
-    if (r.backward > 0) {
-      const played = timesPlayed.get(i) ?? 1;
-      // A repeat barline inside a skipped volta is not taken.
-      if (!skipped && played < r.backward) {
-        timesPlayed.set(i, played + 1);
-        pass = played + 1;
-        repeatDone = false;
-        i = sectionStart;
+    const jump = r.jump;
+    // On its last pass, a jump wins over the repeat barline of its measure.
+    if (jump && !jumpsTaken.has(i) && !(repeatsOn && comesBack(i))) {
+      jumpsTaken.add(i);
+      // The segno is the nearest one before the jump; Fine, To Coda and the
+      // coda are the first ones after it.
+      const segnos = markers(jump.to);
+      const target = jump.to === 'start' ? from
+        : segnos.filter(m => m <= i).pop() ?? segnos[0] ?? null;
+      if (target !== null) {
+        const ends = jump.until === 'end' ? [] : markers(jump.until);
+        const until = ends.find(m => m >= target) ?? ends[0] ?? null;
+        const codas = jump.continueAt ? markers(jump.continueAt) : [];
+        road = {
+          from: i,
+          until,
+          coda: until === null ? null : codas.find(m => m > i) ?? codas[0] ?? null,
+          playRepeats: jump.playRepeats,
+        };
+        if (jump.playRepeats) used.clear();
+        i = target;
+        // With repeats played, the repeat in force is the last one opened
+        // before the target.
+        repeatStart = target;
+        if (jump.playRepeats) {
+          while (repeatStart > from && !repeats[repeatStart].forward) repeatStart--;
+        }
+        pass = 1;
         continue;
       }
-      timesPlayed.set(i, r.backward);
-      repeatDone = true;
     }
+
+    if (repeatsOn && r.backward > 0 && (used.get(i) ?? 0) < r.backward - 1) {
+      used.set(i, (used.get(i) ?? 0) + 1);
+      pass++;
+      i = repeatStart;
+      continue;
+    }
+
     i++;
   }
   return order;
+}
+
+// For each measure of the section, the endings of every volta over it.
+function voltaCoverage(repeats: MeasureRepeat[], from: number, to: number): number[][][] {
+  const covers: number[][][] = Array.from({ length: to - from }, () => []);
+  for (let i = from; i < to; i++) {
+    for (const v of repeats[i].voltas) {
+      let end = Math.min(to, i + Math.max(1, v.length));
+      // An open volta reaches the next repeat barline, if no other volta or
+      // start-repeat barline comes first (or opens it).
+      if (v.open && !repeats[i].forward) {
+        for (let j = i; j < to; j++) {
+          if (j > i && (repeats[j].voltas.length || repeats[j].forward)) break;
+          if (repeats[j].backward > 0) { end = Math.max(end, j + 1); break; }
+        }
+      }
+      for (let k = i; k < end; k++) covers[k - from].push(v.endings);
+    }
+  }
+  return covers;
+}
+
+// Volta groups: runs of consecutive measures under voltas, numbered from 1;
+// 0 outside any volta.
+function voltaGroups(covers: number[][][]): number[] {
+  let n = 0;
+  return covers.map((c, k) => (c.length ? (k > 0 && covers[k - 1].length ? n : ++n) : 0));
+}
+
+// The last ending of the volta group a measure belongs to: the one played
+// when repeats are not taken.
+function groupLastEnding(covers: number[][][], k: number): number {
+  if (!covers[k].length) return 0;
+  let first = k;
+  let last = k;
+  while (first > 0 && covers[first - 1].length) first--;
+  while (last < covers.length - 1 && covers[last + 1].length) last++;
+  return Math.max(...covers.slice(first, last + 1).flat(2));
 }
 
 /**

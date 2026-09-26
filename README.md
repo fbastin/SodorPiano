@@ -8,7 +8,7 @@ A browser-based 88-key piano synthesizer with a realistic sampled grand piano, m
 - 6 sound presets: Sodor Grand, Electric Whistle, Tidmouth Synth, Vicarstown Organ, Steam Whistle, Station Bell
 - Sodor Grand uses 30 recorded notes × 3 velocity layers from the Salamander Grand Piano library, with velocity touch, dampers that fall when a key is released (the top strings have none, as on a real grand), sympathetic resonance and a light room reverb
 - Score import and automated playback: MusicXML (`.musicxml`, `.xml`), compressed MusicXML (`.mxl`) and MuseScore 2, 3 and 4 files (`.mscz`, `.mscx`)
-- Repeats and first/second endings are played as written; tempo changes apply to every staff
+- Repeats, first/second endings, and the road map (D.C., D.S., al Fine, al Coda, section breaks) are played as MuseScore plays them; tempo changes apply to every staff
 - Scores are performed with their dynamics and hairpins (crescendo, decrescendo), accents, staccato and tenuto marks, and sustain pedal; notes are scheduled on the audio clock, so chords sound together and the tempo never drifts
 - Touch and mouse input support
 
