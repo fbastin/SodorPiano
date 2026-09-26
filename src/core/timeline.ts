@@ -32,16 +32,24 @@ export interface MeasurePedal {
   down: boolean;
 }
 
+// A hairpin (or cresc./dim. line) opens with 'cresc' or 'dim' and closes
+// with 'end', possibly in a later measure.
+export interface MeasureHairpin {
+  offset: number;
+  kind: 'cresc' | 'dim' | 'end';
+}
+
 export interface MeasureData {
   length: number;      // beats
   notes: MeasureNote[];
   tempos: MeasureTempo[];
   dynamics: MeasureDynamic[];
+  hairpins: MeasureHairpin[];
   pedals: MeasurePedal[];
 }
 
 export const emptyMeasure = (): MeasureData =>
-  ({ length: 0, notes: [], tempos: [], dynamics: [], pedals: [] });
+  ({ length: 0, notes: [], tempos: [], dynamics: [], hairpins: [], pedals: [] });
 
 export interface MeasureRepeat {
   forward: boolean;          // a repeat section starts here
@@ -172,16 +180,18 @@ export function buildScore(title: string, parts: MeasureData[][], repeats: Measu
   // Tempo marks, dynamics and pedal, in beats from the start of the performance.
   const tempos: MeasureTempo[] = [];
   const dynamics = new Map<number, MeasureDynamic[]>();
+  const hairpins = new Map<number, MeasureHairpin[]>();
   const pedals = new Map<number, MeasurePedal[]>();
   parts.forEach((part, p) => {
     const group = groups[p];
-    if (!dynamics.has(group)) { dynamics.set(group, []); pedals.set(group, []); }
+    if (!dynamics.has(group)) { dynamics.set(group, []); hairpins.set(group, []); pedals.set(group, []); }
     order.forEach((m, k) => {
       const measure = part[m];
       if (!measure) return;
       const at = measureStarts[k];
       for (const t of measure.tempos) tempos.push({ ...t, offset: at + t.offset });
       for (const d of measure.dynamics) dynamics.get(group)!.push({ ...d, offset: at + d.offset });
+      for (const h of measure.hairpins) hairpins.get(group)!.push({ ...h, offset: at + h.offset });
       for (const e of measure.pedals) pedals.get(group)!.push({ ...e, offset: at + e.offset });
     });
   });
@@ -191,7 +201,7 @@ export function buildScore(title: string, parts: MeasureData[][], repeats: Measu
   const notes: MusicNote[] = [];
   parts.forEach((part, p) => {
     const group = groups[p];
-    const marks = dynamics.get(group)!.sort((a, b) => a.offset - b.offset);
+    const velocityAt = dynamicsCurve(dynamics.get(group)!, hairpins.get(group)!, end);
     const damperFall = pedalUp.get(group)!;
     // Tied notes extend the latest note of the same pitch in this part only.
     const lastByKey = new Map<number, { start: number; release: number; velocity: number }>();
@@ -205,7 +215,7 @@ export function buildScore(title: string, parts: MeasureData[][], repeats: Measu
         if (tied) {
           tied.release = release;
         } else {
-          const velocity = Math.max(0.05, Math.min(1, velocityAt(marks, start) * (n.accent ?? 1)));
+          const velocity = Math.max(0.05, Math.min(1, velocityAt(start) * (n.accent ?? 1)));
           const note = { keyIndex: n.keyIndex, start, release, velocity };
           beatNotes.push(note);
           lastByKey.set(n.keyIndex, note);
@@ -234,7 +244,9 @@ export function buildScore(title: string, parts: MeasureData[][], repeats: Measu
   };
 }
 
-function velocityAt(marks: MeasureDynamic[], beat: number): number {
+// The level in force at a beat from the dynamic marks alone, and the
+// velocity of a momentary mark (sf…) struck exactly there, if any.
+function markLevel(marks: MeasureDynamic[], beat: number): { level: number; hit?: number } {
   let level = DEFAULT_VELOCITY;
   let hit: number | undefined;
   for (const mark of marks) {
@@ -243,7 +255,68 @@ function velocityAt(marks: MeasureDynamic[], beat: number): number {
     else if (mark.after !== undefined) level = mark.after;
     hit = mark.momentary && Math.abs(mark.offset - beat) < EPSILON ? mark.velocity : undefined;
   }
-  return hit ?? level;
+  return { level, hit };
+}
+
+// Dynamic levels a hairpin moves between when no mark tells it where to go.
+const LEVELS = [16, 33, 49, 64, 80, 96, 112, 126].map(v => v / 127);
+
+function nextLevel(velocity: number, direction: number): number {
+  const margin = 0.5 / 127;
+  return direction > 0
+    ? LEVELS.find(l => l > velocity + margin) ?? 1
+    : [...LEVELS].reverse().find(l => l < velocity - margin) ?? LEVELS[0];
+}
+
+/**
+ * Velocity at any beat, from dynamic marks and hairpins, as MuseScore plays
+ * them: a hairpin moves linearly from the level in force where it starts to
+ * the mark at its end — if that mark goes the hairpin's way; otherwise, or
+ * without a mark, to the next dynamic level (mf → f). A mark written inside
+ * the hairpin ends it there. Without a mark at its end, the level reached
+ * holds until the next mark.
+ */
+function dynamicsCurve(marks: MeasureDynamic[], hairpins: MeasureHairpin[], end: number): (beat: number) => number {
+  const sorted = [...marks].sort((a, b) => a.offset - b.offset);
+  const steady = sorted.filter(m => !m.momentary || m.after !== undefined);
+  const ramps: { start: number; end: number; from: number; to: number }[] = [];
+
+  const valueAt = (beat: number): number => {
+    const { level, hit } = markLevel(sorted, beat);
+    if (hit !== undefined) return hit;
+    const ramp = ramps.find(r => beat >= r.start - EPSILON && beat < r.end - EPSILON);
+    return ramp ? ramp.from + (ramp.to - ramp.from) * (beat - ramp.start) / (ramp.end - ramp.start) : level;
+  };
+
+  // Pair each opening with the next closing; an unclosed hairpin runs until
+  // the next one opens, or to the end of the score.
+  const spans: { kind: 'cresc' | 'dim'; start: number; end: number }[] = [];
+  let open: { kind: 'cresc' | 'dim'; start: number } | null = null;
+  const events = [...hairpins].sort((a, b) => a.offset - b.offset || Number(a.kind !== 'end') - Number(b.kind !== 'end'));
+  for (const h of events) {
+    if (open && h.offset > open.start + EPSILON) spans.push({ ...open, end: h.offset });
+    if (h.kind === 'end') open = null;
+    else if (!open || h.offset > open.start + EPSILON) open = { kind: h.kind, start: h.offset };
+  }
+  if (open && end > open.start + EPSILON) spans.push({ ...open, end });
+
+  for (const span of spans) {
+    const from = valueAt(span.start);
+    const cut = steady.find(m => m.offset > span.start + EPSILON && m.offset < span.end - EPSILON);
+    const stop = cut ? cut.offset : span.end;
+    const markAtStop = steady.find(m => Math.abs(m.offset - stop) < EPSILON);
+    const direction = span.kind === 'cresc' ? 1 : -1;
+    const to = markAtStop && Math.sign(markAtStop.velocity - from) === direction
+      ? markAtStop.velocity
+      : nextLevel(from, direction);
+    ramps.push({ start: span.start, end: stop, from, to });
+    // The level reached holds after the hairpin, unless a mark takes over.
+    if (!markAtStop) {
+      sorted.push({ offset: stop, velocity: to });
+      sorted.sort((a, b) => a.offset - b.offset);
+    }
+  }
+  return valueAt;
 }
 
 // Returns, for a key released at a given beat, when its damper actually

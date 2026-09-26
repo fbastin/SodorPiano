@@ -87,6 +87,13 @@ function parsePart(measures: Element[]): MeasureData[] {
           soundDynamics >= 0 ? Math.min(127, soundDynamics * 0.9) : undefined);
         if (d) { data.dynamics.push(d); dynamic = true; }
       }
+      // Hairpins: <wedge type="crescendo|diminuendo|stop">.
+      for (const wedge of Array.from(direction.querySelectorAll('direction-type > wedge'))) {
+        const type = wedge.getAttribute('type');
+        if (type === 'crescendo') data.hairpins.push({ offset, kind: 'cresc' });
+        if (type === 'diminuendo') data.hairpins.push({ offset, kind: 'dim' });
+        if (type === 'stop') data.hairpins.push({ offset, kind: 'end' });
+      }
       let pedal = false;
       for (const mark of Array.from(direction.querySelectorAll('direction-type > pedal'))) {
         const type = mark.getAttribute('type');

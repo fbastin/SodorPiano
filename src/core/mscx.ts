@@ -151,9 +151,10 @@ function parseStaff(measures: Element[], division: number): MeasureData[] {
   let measureStart = 0;   // beats from the start of the score, repeats not unrolled
   const ottavas: Ottava[] = [];
   const pedals: Span[] = [];
-  // Files from MuseScore 3.0 write spanners as <Pedal id="…"> … <endSpanner
-  // id="…"/>, the end being wherever the closing tag stands.
-  const openById = new Map<string, { measure: number; beat: number; shift?: number }>();
+  const hairpins: (Span & { kind: 'cresc' | 'dim' })[] = [];
+  // Files from MuseScore 2 and 3.0 write spanners as <Pedal id="…"> …
+  // <endSpanner id="…"/>, the end being wherever the closing tag stands.
+  const openById = new Map<string, { measure: number; beat: number; element: Element }>();
 
   const data = measures.map((measure, index) => {
     const out = emptyMeasure();
@@ -220,15 +221,10 @@ function parseStaff(measures: Element[], division: number): MeasureData[] {
             break;
           }
           case 'Pedal':
-          case 'Ottava': {
+          case 'Ottava':
+          case 'HairPin': {
             const id = el.getAttribute('id');
-            if (id) {
-              openById.set(id, {
-                measure: index,
-                beat: time,
-                shift: el.tagName === 'Ottava' ? OTTAVA_SHIFT[childText(el, 'subtype') ?? ''] ?? 0 : undefined,
-              });
-            }
+            if (id) openById.set(id, { measure: index, beat: time, element: el });
             break;
           }
           case 'endSpanner': {
@@ -236,8 +232,12 @@ function parseStaff(measures: Element[], division: number): MeasureData[] {
             if (!open) break;
             openById.delete(el.getAttribute('id') ?? '');
             const span = { startMeasure: open.measure, startBeat: open.beat, endMeasure: index, endBeat: time };
-            if (open.shift === undefined) pedals.push(span);
-            else ottavas.push({ ...span, shift: open.shift });
+            const start = open.element;
+            if (start.tagName === 'Pedal') pedals.push(span);
+            if (start.tagName === 'Ottava') {
+              ottavas.push({ ...span, shift: OTTAVA_SHIFT[childText(start, 'subtype') ?? ''] ?? 0 });
+            }
+            if (start.tagName === 'HairPin') hairpins.push({ ...span, kind: hairpinKind(start) });
             break;
           }
           case 'Spanner': {
@@ -251,6 +251,10 @@ function parseStaff(measures: Element[], division: number): MeasureData[] {
             }
             if (el.getAttribute('type') === 'Pedal' && child(el, 'Pedal')) {
               pedals.push(spanOf(el, index, time));
+            }
+            const hairpin = child(el, 'HairPin');
+            if (el.getAttribute('type') === 'HairPin' && hairpin) {
+              hairpins.push({ ...spanOf(el, index, time), kind: hairpinKind(hairpin) });
             }
             break;
           }
@@ -287,25 +291,40 @@ function parseStaff(measures: Element[], division: number): MeasureData[] {
   });
 
   applyOttavas(data, ottavas);
-  // A pedal line is a down/up pair; the lift may fall in a later measure,
-  // or after the last one.
-  // An end at the very start of a measure belongs to the end of the one
-  // before: the two differ when a repeat barline stands between them.
+  // Pedal lines and hairpins become a start and an end event; the end may
+  // fall in a later measure, or after the last one.
   for (const p of pedals) {
     data[p.startMeasure]?.pedals.push({ offset: p.startBeat, down: true });
-    let m = Math.min(p.endMeasure, data.length);
-    let beat = m < data.length ? p.endBeat : 0;
-    while (m > p.startMeasure && beat <= 0) {
-      m--;
-      beat += data[m].length;
-    }
-    data[m].pedals.push({ offset: beat, down: false });
+    const end = spanEnd(data, p);
+    data[end.measure].pedals.push({ offset: end.beat, down: false });
+  }
+  for (const h of hairpins) {
+    data[h.startMeasure]?.hairpins.push({ offset: h.startBeat, kind: h.kind });
+    const end = spanEnd(data, h);
+    data[end.measure].hairpins.push({ offset: end.beat, kind: 'end' });
   }
   for (const measure of data) {
     measure.notes = measure.notes.filter(n => n.keyIndex >= 0 && n.keyIndex < 88);
   }
   return data;
 }
+
+// Where a spanner ends, as a measure of this staff and a beat in it. An end
+// at the very start of a measure belongs to the end of the one before: the
+// two differ when a repeat barline stands between them.
+function spanEnd(data: MeasureData[], span: Span): { measure: number; beat: number } {
+  let measure = Math.min(span.endMeasure, data.length);
+  let beat = measure < data.length ? span.endBeat : 0;
+  while (measure > span.startMeasure && beat <= 0) {
+    measure--;
+    beat += data[measure].length;
+  }
+  return { measure, beat };
+}
+
+// Subtypes 0 and 2 grow (hairpin, "cresc." line), 1 and 3 shrink.
+const hairpinKind = (hairpin: Element): 'cresc' | 'dim' =>
+  Number(childText(hairpin, 'subtype') ?? 0) % 2 === 0 ? 'cresc' : 'dim';
 
 function durationBeats(el: Element, measureBeats: number): number {
   const type = childText(el, 'durationType') ?? 'quarter';
