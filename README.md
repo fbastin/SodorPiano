@@ -14,6 +14,17 @@ A browser-based 88-key piano synthesizer with a realistic sampled grand piano, m
 - Volume, tempo (0.25× to 2×) and sustain pedal controls; a key struck near its front sounds louder than one grazed at the top
 - Touch and mouse input support
 
+## Finding scores
+
+Any MusicXML or MuseScore file will do. Some places to find them:
+
+- [OpenScore](https://github.com/OpenScore): public-domain works transcribed by volunteers, released under CC0 (no restrictions). The [Lieder](https://github.com/OpenScore/Lieder) collection — songs for voice and piano — comes as MuseScore (`.mscz`) and compressed MusicXML (`.mxl`) files; the [String Quartets](https://github.com/OpenScore/StringQuartets) as `.mscx` and `.mxl`.
+- [MuseScore.com](https://musescore.com/): a very large catalogue shared by its users. Downloading often requires an account, and the license varies from score to score.
+- [IMSLP](https://imslp.org/): mostly scanned PDFs, but some works also have MusicXML files.
+- [MusicXML example set](https://www.musicxml.com/music-in-musicxml/example-set/): a handful of reference scores, handy for a first try.
+
+A score of a work still under copyright may only be used as its license allows.
+
 ## Sound sources & credits
 
 The `Sodor Grand` preset plays the **Salamander Grand Piano** sample library by Alessandro Iafrati, released under the [Creative Commons Attribution 3.0](https://creativecommons.org/licenses/by/3.0/) license (CC-BY-3.0). The samples are bundled under `assets/samples/`; see `assets/samples/samples-LICENSE.txt` for full attribution.
@@ -67,6 +78,21 @@ export default defineConfig({
 
 Then run `npm run deploy` again.
 
+## Testing
+
+```bash
+npm test
+```
+
+The tests check SodorPiano against MuseScore itself, on scores from MuseScore's own test suite whose expected results MuseScore publishes alongside them:
+
+- **Repeats and jumps**: the 69 scores of `src/engraving/tests/repeat_data`, with the order in which MuseScore plays their measures (`repeat_tests.cpp`). 66 match; the 3 others, jumps landing inside a first ending, are marked as known differences.
+- **Dynamics, articulations and pedal**: MuseScore's MIDI export of four scores (`src/importexport/midi/tests/midiexport_data`), and the velocities it gives under six hairpins (`midirenderer_tests.cpp`).
+- **Files**: MuseScore's demo scores (formats 2 and 3), MuseScore 4 archives, the spelling of notes, and the MuseScore → MusicXML conversion used by the full-score view (same notes after a round trip).
+- **MusicXML and playback order**: scores and repeat structures written in the tests themselves (repeats, voltas, nested repeats, D.C. and D.S., dynamics, pedal, articulations, `.mxl` files).
+
+Before the tests run, `scripts/fetch-fixtures.mjs` downloads the MuseScore files they need (1.3 MB) from a fixed commit of [MuseScore's repository](https://github.com/musescore/MuseScore), into `test/fixtures/`. They are MuseScore's, under GPL-3.0: they are kept out of version control and never bundled.
+
 ## Embedding in another page
 
 In a project built with Vite (or another bundler that compiles TypeScript), you can use the `SodorPiano` class directly:
@@ -112,6 +138,8 @@ index.html                Built page, served (build output — see npm run deplo
 assets/                   Built bundles (build output) and samples/, the Salamander
                           Grand Piano samples (see samples/samples-LICENSE.txt)
 scripts/deploy.mjs        Build and deployment script
+scripts/fetch-fixtures.mjs  Downloads the MuseScore test files (npm test runs it)
+test/                     Tests (Vitest); test/fixtures/ is downloaded, not versioned
 THIRD_PARTY_NOTICES.md    Licenses of the libraries bundled in the full-score view
 ```
 

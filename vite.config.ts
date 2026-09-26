@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from 'vite';
 
 // The page is served straight from the repository: index.html and the
@@ -23,5 +24,12 @@ export default defineConfig({
     // The engraver chunk is large, and loaded only when the full score is
     // first shown.
     chunkSizeWarningLimit: 1500,
+  },
+  test: {
+    include: ['test/**/*.test.ts'],
+    // Node's Blob, fetch and DecompressionStream, with jsdom's DOMParser.
+    environment: 'node',
+    setupFiles: ['test/setup.ts'],
+    testTimeout: 30000,
   },
 });

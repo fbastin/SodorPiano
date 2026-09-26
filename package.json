@@ -7,11 +7,15 @@
     "dev": "vite --open /SodorPiano/index.src.html",
     "build": "vite build",
     "preview": "vite preview --open /SodorPiano/index.src.html",
-    "deploy": "node scripts/deploy.mjs"
+    "deploy": "node scripts/deploy.mjs",
+    "pretest": "node scripts/fetch-fixtures.mjs",
+    "test": "vitest run"
   },
   "devDependencies": {
+    "jsdom": "^24.1.3",
     "typescript": "~5.8.2",
-    "vite": "^6.2.3"
+    "vite": "^6.2.3",
+    "vitest": "^3.2.7"
   },
   "dependencies": {
     "opensheetmusicdisplay": "^2.1.3"
