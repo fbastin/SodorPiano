@@ -18,7 +18,9 @@ export async function loadScoreFile(file: Blob): Promise<MusicScore> {
 }
 
 export function parseScoreText(text: string): MusicScore {
-  return /<museScore[\s>]/.test(text) ? parseMscx(text) : parseMusicXml(text);
+  const format = /<museScore[\s>]/.test(text) ? 'mscx' : 'musicxml';
+  const score = format === 'mscx' ? parseMscx(text) : parseMusicXml(text);
+  return { ...score, source: { format, text } };
 }
 
 const SCORE_PATH = /\.(mscx?|musicxml|xml)$/i;

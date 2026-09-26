@@ -11,6 +11,8 @@ export interface MeasureNote {
   tieStop: boolean;    // continues the previous note of the same pitch
   held?: number;       // share of the written length the key is held (staccato < 1)
   accent?: number;     // velocity factor of an accent mark (> 1)
+  letter?: number;     // spelling: letter 0–6 (C to B)…
+  alter?: number;      // …and alteration in semitones
 }
 
 export interface MeasureTempo {
@@ -412,30 +414,39 @@ export function buildScore(title: string, parts: MeasureData[][], repeats: Measu
   const toSeconds = tempoMap(tempos);
   const pedalUp = new Map([...pedals].map(([g, events]) => [g, pedalReleases(events, end)]));
 
-  const notes: MusicNote[] = [];
+  // Every note of each instrument, in the order played.
+  const played = new Map<number, (MeasureNote & { start: number })[]>();
   parts.forEach((part, p) => {
     const group = groups[p];
+    if (!played.has(group)) played.set(group, []);
+    order.forEach((m, k) => {
+      for (const n of part[m]?.notes ?? []) played.get(group)!.push({ ...n, start: measureStarts[k] + n.offset });
+    });
+  });
+
+  const notes: MusicNote[] = [];
+  for (const [group, groupNotes] of played) {
     const velocityAt = dynamicsCurve(dynamics.get(group)!, hairpins.get(group)!, end);
     const damperFall = pedalUp.get(group)!;
-    // Tied notes extend the latest note of the same pitch in this part only.
-    const lastByKey = new Map<number, { start: number; release: number; velocity: number }>();
-    const beatNotes: { keyIndex: number; start: number; release: number; velocity: number }[] = [];
+    // A tied note extends the latest note of the same pitch before it on any
+    // staff of the instrument: ties may cross from one staff to the other,
+    // or start on a grace note sounding at the same time.
+    const lastByKey = new Map<number, { start: number; release: number }>();
+    const beatNotes: { keyIndex: number; start: number; release: number; velocity: number;
+                       letter?: number; alter?: number }[] = [];
 
-    order.forEach((m, k) => {
-      for (const n of part[m]?.notes ?? []) {
-        const start = measureStarts[k] + n.offset;
-        const release = start + n.duration * (n.held ?? 1);
-        const tied = n.tieStop ? lastByKey.get(n.keyIndex) : undefined;
-        if (tied) {
-          tied.release = release;
-        } else {
-          const velocity = Math.max(0.05, Math.min(1, velocityAt(start) * (n.accent ?? 1)));
-          const note = { keyIndex: n.keyIndex, start, release, velocity };
-          beatNotes.push(note);
-          lastByKey.set(n.keyIndex, note);
-        }
+    for (const n of [...groupNotes].sort((a, b) => a.start - b.start)) {
+      const release = n.start + n.duration * (n.held ?? 1);
+      const tied = n.tieStop ? lastByKey.get(n.keyIndex) : undefined;
+      if (tied && tied.start <= n.start + EPSILON) {
+        tied.release = Math.max(tied.release, release);
+      } else {
+        const velocity = Math.max(0.05, Math.min(1, velocityAt(n.start) * (n.accent ?? 1)));
+        const note = { keyIndex: n.keyIndex, start: n.start, release, velocity, letter: n.letter, alter: n.alter };
+        beatNotes.push(note);
+        lastByKey.set(n.keyIndex, note);
       }
-    });
+    }
 
     for (const n of beatNotes) {
       const time = toSeconds(n.start);
@@ -445,16 +456,21 @@ export function buildScore(title: string, parts: MeasureData[][], repeats: Measu
         // A key released while the pedal is down keeps sounding until the
         // pedal lifts.
         duration: toSeconds(damperFall(n.release)) - time,
+        hold: toSeconds(n.release) - time,
         velocity: n.velocity,
+        letter: n.letter,
+        alter: n.alter,
       });
     }
-  });
+  }
 
   return {
     id: `imported-${Date.now()}`,
     title,
     thumbnail: '🎼',
     notes: notes.sort((a, b) => a.time - b.time),
+    measures: measureStarts.map(toSeconds),
+    measureOrder: order,
   };
 }
 

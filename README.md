@@ -10,6 +10,7 @@ A browser-based 88-key piano synthesizer with a realistic sampled grand piano, m
 - Score import and automated playback: MusicXML (`.musicxml`, `.xml`), compressed MusicXML (`.mxl`) and MuseScore 2, 3 and 4 files (`.mscz`, `.mscx`)
 - Repeats (nested ones included), first/second endings, and the road map (D.C., D.S., al Fine, al Coda, section breaks) are played as MuseScore plays them; tempo changes apply to every staff
 - Scores are performed with their dynamics and hairpins (crescendo, decrescendo), accents, staccato and tenuto marks, and sustain pedal; notes are scheduled on the audio clock, so chords sound together and the tempo never drifts
+- A scrolling view above the keyboard follows the score as it plays: either a simple grand staff (notes placed by time, also showing the notes played by hand) or the full score, engraved with OpenSheetMusicDisplay (loaded on demand; MuseScore files are converted to MusicXML for it). It can be hidden for small screens
 - Touch and mouse input support
 
 ## Sound sources & credits

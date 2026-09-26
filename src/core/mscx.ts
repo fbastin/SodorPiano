@@ -5,7 +5,7 @@ import { MeasureData, MeasureNote, MeasureRepeat, buildScore, dynamicMark, empty
 // written by MuseScore 2, 3 and 4. Unlike MusicXML it stores MIDI pitches and
 // symbolic durations, and it keeps octave marks (8va…) out of the pitch.
 
-const DURATION_BEATS: Record<string, number> = {
+export const DURATION_BEATS: Record<string, number> = {
   'long': 16, 'breve': 8, 'whole': 4, 'half': 2, 'quarter': 1, 'eighth': 0.5,
   '16th': 1 / 4, '32nd': 1 / 8, '64th': 1 / 16, '128th': 1 / 32,
   '256th': 1 / 64, '512th': 1 / 128, '1024th': 1 / 256,
@@ -15,23 +15,23 @@ const OTTAVA_SHIFT: Record<string, number> = {
   '8va': 12, '8vb': -12, '15ma': 24, '15mb': -24, '22ma': 36, '22mb': -36,
 };
 
-const GRACE_TAG = /^(acciaccatura|appoggiatura|grace\d+(after)?)$/;
+export const GRACE_TAG = /^(acciaccatura|appoggiatura|grace\d+(after)?)$/;
 const GRACE_BEATS = 0.125;
 
 // MIDI note 21 is A0, the lowest piano key.
 const MIDI_A0 = 21;
 
-const children = (el: Element, tag?: string): Element[] =>
+export const children = (el: Element, tag?: string): Element[] =>
   Array.from(el.children).filter(c => !tag || c.tagName === tag);
 
-const child = (el: Element, tag: string): Element | undefined =>
+export const child = (el: Element, tag: string): Element | undefined =>
   children(el, tag)[0];
 
-const childText = (el: Element, tag: string): string | undefined =>
+export const childText = (el: Element, tag: string): string | undefined =>
   child(el, tag)?.textContent?.trim();
 
 // "3/8" → 1.5 beats (quarter notes).
-const fractionBeats = (text: string | undefined): number => {
+export const fractionBeats = (text: string | undefined): number => {
   const [n, d] = (text ?? '').split('/').map(Number);
   return n && d ? (n / d) * 4 : 0;
 };
@@ -49,7 +49,7 @@ export const parseMscx = (xmlString: string): MusicScore => {
 export const mscxMeasureOrder = (xmlString: string): number[] =>
   playbackOrder(parseRepeats(readScore(xmlString).staves));
 
-function readScore(xmlString: string) {
+export function readScore(xmlString: string) {
   const doc = new DOMParser().parseFromString(xmlString, 'text/xml');
   if (doc.querySelector('parsererror')) throw new Error('The file is not valid XML');
 
@@ -269,7 +269,7 @@ function parseStaff(measures: Element[], division: number): MeasureData[] {
           case 'Rest':
           case 'Chord': {
             const isGrace = children(el).some(c => GRACE_TAG.test(c.tagName));
-            const beats = isGrace ? 0 : durationBeats(el, timeSigBeats * stretch) * tupletRatio(el) / stretch;
+            const beats = isGrace ? 0 : durationBeats(el, timeSigBeats * stretch, tupletRatio(el)) / stretch;
             if (el.tagName === 'Chord') {
               for (const note of children(el, 'Note')) {
                 if (childText(note, 'play') === '0') continue;
@@ -280,6 +280,7 @@ function parseStaff(measures: Element[], division: number): MeasureData[] {
                   offset: time,
                   duration: isGrace ? GRACE_BEATS : beats,
                   tieStop: isTieStop(note),
+                  ...spelling(note),
                   ...articulation(el),
                 });
               }
@@ -334,18 +335,33 @@ function spanEnd(data: MeasureData[], span: Span): { measure: number; beat: numb
 const hairpinKind = (hairpin: Element): 'cresc' | 'dim' =>
   Number(childText(hairpin, 'subtype') ?? 0) % 2 === 0 ? 'cresc' : 'dim';
 
-function durationBeats(el: Element, measureBeats: number): number {
+// MuseScore spells a note by its tonal pitch class (tpc): its place on the
+// line of fifths, 14 being C, 15 G, 13 F, 20 F sharp, 8 B flat…
+const FIFTHS_LETTERS = [3, 0, 4, 1, 5, 2, 6];   // F C G D A E B, as letters 0–6 from C
+
+export function spelling(note: Element): { letter?: number; alter?: number } {
+  const tpc = Number(childText(note, 'tpc'));
+  if (!Number.isInteger(tpc)) return {};
+  return { letter: FIFTHS_LETTERS[((tpc + 1) % 7 + 7) % 7], alter: Math.floor((tpc + 1) / 7) - 2 };
+}
+
+// Actual length of a chord or rest, in beats. MuseScore writes it apart,
+// as <duration>, when it differs from the written value: full-measure rests,
+// and the two chords of a tremolo, which share the time between them.
+// `tuplet` scales the written value only.
+export function durationBeats(el: Element, measureBeats: number, tuplet = 1): number {
+  const actual = fractionBeats(childText(el, 'duration'));
+  if (actual) return actual;
   const type = childText(el, 'durationType') ?? 'quarter';
-  // Full-measure rests give their length explicitly, as a fraction.
-  if (type === 'measure') return fractionBeats(childText(el, 'duration')) || measureBeats;
+  if (type === 'measure') return measureBeats;
   const base = DURATION_BEATS[type] ?? 1;
   const dots = Number(childText(el, 'dots')) || 0;
-  return base * (2 - Math.pow(2, -dots));
+  return base * (2 - Math.pow(2, -dots)) * tuplet;
 }
 
 // A note ending a tie points back to its start: <Spanner type="Tie"><prev>
 // in MuseScore 3.1+ and 4, <endSpanner> in earlier 3.x files.
-function isTieStop(note: Element): boolean {
+export function isTieStop(note: Element): boolean {
   return children(note, 'Spanner').some(s => s.getAttribute('type') === 'Tie' && child(s, 'prev'))
       || child(note, 'endSpanner') !== undefined;
 }
@@ -367,7 +383,7 @@ function applyOttavas(data: MeasureData[], ottavas: Ottava[]) {
 
 // Repeat marks sit on the measures of every staff; voltas usually only on
 // the top one. All staves are merged so that none is missed.
-function parseRepeats(staves: Element[][]): MeasureRepeat[] {
+export function parseRepeats(staves: Element[][]): MeasureRepeat[] {
   const count = Math.max(0, ...staves.map(s => s.length));
   const repeats = Array.from({ length: count }, noRepeat);
 

@@ -60,6 +60,9 @@ function parsePart(measures: Element[]): MeasureData[] {
     let time = 0;          // in divisions
     let maxTime = 0;
     let lastStart = 0;     // start of the previous note, for chords
+    // Articulations of the chord being read: MuseScore, among others,
+    // writes them on its first note only.
+    let chordMarks: ReturnType<typeof articulation> = {};
 
     // <sound> carries playback values: tempo, dynamics (as a percentage of
     // MIDI velocity 90) and the damper pedal.
@@ -143,7 +146,9 @@ function parsePart(measures: Element[]): MeasureData[] {
                 offset: start / divisions,
                 duration: isGrace ? GRACE_BEATS : duration / divisions,
                 tieStop: child.querySelector('tie[type="stop"]') !== null,
-                ...articulation(child),
+                letter: 'CDEFGAB'.indexOf(step),
+                alter,
+                ...(isChord ? { ...chordMarks, ...articulation(child) } : (chordMarks = articulation(child))),
               });
             }
           }
@@ -165,8 +170,13 @@ function parsePart(measures: Element[]): MeasureData[] {
 
 function articulation(note: Element): Pick<MeasureNote, 'held' | 'accent'> {
   const result: Pick<MeasureNote, 'held' | 'accent'> = {};
-  for (const mark of Array.from(note.querySelectorAll('notations > articulations > *'))) {
-    if (mark.tagName in HELD) result.held = Math.min(result.held ?? 1, HELD[mark.tagName]);
+  const marks = Array.from(note.querySelectorAll('notations > articulations > *'));
+  // With a tenuto, a strong accent keeps the key down (MuseScore's marcato-tenuto).
+  const tenuto = marks.some(m => m.tagName === 'tenuto');
+  for (const mark of marks) {
+    if (mark.tagName in HELD && !(tenuto && mark.tagName === 'strong-accent')) {
+      result.held = Math.min(result.held ?? 1, HELD[mark.tagName]);
+    }
     if (mark.tagName in ACCENT) result.accent = Math.max(result.accent ?? 1, ACCENT[mark.tagName]);
   }
   return result;
