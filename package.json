@@ -2,11 +2,12 @@
   "name": "sodor-piano",
   "version": "1.0.0",
   "type": "module",
-  "description": "A browser-based 88-key piano with multiple synthesized sound presets and MusicXML / MuseScore playback",
+  "description": "A browser-based 88-key piano with a sampled grand piano, synthesized sound presets, and MusicXML / MuseScore playback with a scrolling score",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --open /SodorPiano/index.src.html",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview --open /SodorPiano/index.src.html",
+    "deploy": "node scripts/deploy.mjs"
   },
   "devDependencies": {
     "typescript": "~5.8.2",

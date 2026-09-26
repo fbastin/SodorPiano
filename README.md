@@ -11,13 +11,16 @@ A browser-based 88-key piano synthesizer with a realistic sampled grand piano, m
 - Repeats (nested ones included), first/second endings, and the road map (D.C., D.S., al Fine, al Coda, section breaks) are played as MuseScore plays them; tempo changes apply to every staff
 - Scores are performed with their dynamics and hairpins (crescendo, decrescendo), accents, staccato and tenuto marks, and sustain pedal; notes are scheduled on the audio clock, so chords sound together and the tempo never drifts
 - A scrolling view above the keyboard follows the score as it plays: either a simple grand staff (notes placed by time, also showing the notes played by hand) or the full score, engraved with OpenSheetMusicDisplay (loaded on demand; MuseScore files are converted to MusicXML for it). It can be hidden for small screens
+- Volume, tempo (0.25× to 2×) and sustain pedal controls; a key struck near its front sounds louder than one grazed at the top
 - Touch and mouse input support
 
 ## Sound sources & credits
 
-The `Sodor Grand` preset plays the **Salamander Grand Piano** sample library by Alessandro Iafrati, released under the [Creative Commons Attribution 3.0](https://creativecommons.org/licenses/by/3.0/) license (CC-BY-3.0). The samples are bundled under `assets/samples/`; see `samples-LICENSE.txt` for full attribution.
+The `Sodor Grand` preset plays the **Salamander Grand Piano** sample library by Alessandro Iafrati, released under the [Creative Commons Attribution 3.0](https://creativecommons.org/licenses/by/3.0/) license (CC-BY-3.0). The samples are bundled under `assets/samples/`; see `assets/samples/samples-LICENSE.txt` for full attribution.
 
 The remaining presets are synthesized live with the Web Audio API and require no samples.
+
+The full-score view is engraved by [OpenSheetMusicDisplay](https://opensheetmusicdisplay.org/) (BSD-3-Clause), which includes VexFlow, JSZip, pako, loglevel and typescript-collections (MIT). Their copyright notices and license texts are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 All other app code is released under the MIT license.
 
@@ -37,43 +40,41 @@ npm install
 npm run dev
 ```
 
-Opens a local development server (default: http://localhost:5173).
+Starts a local development server and opens the source page, `index.src.html` (http://localhost:5173/SodorPiano/index.src.html).
 
-### Production build
+### Production build and deployment
 
-```bash
-npm run build
-```
-
-Outputs static files to `dist/`. Serve them with any web server:
+The application is served straight from the repository: `index.html` and the bundles in `assets/` (`index-*.js`, and `notation-*.js` for the full-score view) are build output, committed alongside the sources. Edit `index.src.html`, never `index.html`.
 
 ```bash
-npm run preview
+npm run deploy
 ```
 
-### Deploying behind a base path
+Builds the application and replaces `index.html` and the bundles in `assets/` with the new ones, removing those of the previous build; the samples in `assets/samples/` are left as they are. Commit the result to publish it.
 
-If you deploy under a subpath (e.g. `https://example.com/piano/`), set the `base` option in `vite.config.ts`:
+`npm run build` alone builds into `dist/` without touching the served files; `npm run preview` serves that build locally.
+
+### Deploying behind another base path
+
+The application expects to be served under `/SodorPiano/`. To serve it elsewhere (e.g. `https://example.com/piano/`), change `base` in `vite.config.ts`, and the paths opened by the `dev` and `preview` scripts in `package.json`:
 
 ```ts
 export default defineConfig({
   base: '/piano/',
-  build: { outDir: 'dist', emptyOutDir: true },
+  // …
 });
 ```
 
-Then rebuild.
+Then run `npm run deploy` again.
 
 ## Embedding in another page
 
-You can also use the `SodorPiano` class directly:
+In a project built with Vite (or another bundler that compiles TypeScript), you can use the `SodorPiano` class directly:
 
-```html
-<div id="piano" style="width:100%;height:600px"></div>
-<script type="module">
-  import { SodorPiano } from './src/ui/piano-vanilla.ts';
-  new SodorPiano(document.getElementById('piano'));
-</script>
+```ts
+import { SodorPiano } from './SodorPiano/src/ui/piano-vanilla';
+
+new SodorPiano(document.getElementById('piano')!);   // e.g. <div id="piano" style="width:100%;height:600px">
 ```
 
 To load a score programmatically, pass a `File` or `Blob` in any supported format to `loadScoreFile`, then call `playScore`:
@@ -84,26 +85,36 @@ await piano.loadScoreFile(await (await fetch('song.mscz')).blob());
 piano.playScore();
 ```
 
+Other public methods: `loadMusicXml(text)`, `stopScore()`, `playNote(keyIndex, duration, velocity)` (key 0 is A0, 87 is C8), `setSoundType(type)` and `setPedal(down)`.
+
 ## Project structure
 
 ```
 src/
   core/
-    audio.ts          Audio synthesis engine (Web Audio API) + sample playback
-    parser.ts         MusicXML parser
-    mscx.ts           MuseScore (.mscx) parser
-    timeline.ts       Repeat unrolling and tempo map shared by both parsers
-    zip.ts            ZIP reader for .mxl and .mscz archives
-    score-file.ts     Score file loader: detects the format from the content
+    audio.ts              Audio engine (Web Audio API): sampled grand, synthesized presets, reverb
+    parser.ts             MusicXML parser
+    mscx.ts               MuseScore (.mscx) parser
+    mscx-to-musicxml.ts   MuseScore → MusicXML conversion, for the full-score view
+    timeline.ts           Shared playback model: repeats, voltas and jumps, tempo map,
+                          dynamics and hairpins, pedal, ties
+    zip.ts                ZIP reader for .mxl and .mscz archives
+    score-file.ts         Score file loader: detects the format from the content
   ui/
-    piano-vanilla.ts  Self-contained piano UI component
-  types.ts            Shared type definitions
-  main.ts             Application entry point
-  index.ts            Library barrel export
-index.html            Standalone app shell
-assets/samples/       Salamander Grand Piano sample files (see samples-LICENSE.txt)
+    piano-vanilla.ts      Self-contained piano UI component
+    staff.ts              Simple scrolling grand staff (canvas)
+    notation.ts           Full-score view (OpenSheetMusicDisplay), loaded on demand
+  types.ts                Shared type definitions
+  main.ts                 Application entry point
+  index.ts                Library barrel export
+index.src.html            Source page (Vite entry)
+index.html                Built page, served (build output — see npm run deploy)
+assets/                   Built bundles (build output) and samples/, the Salamander
+                          Grand Piano samples (see samples/samples-LICENSE.txt)
+scripts/deploy.mjs        Build and deployment script
+THIRD_PARTY_NOTICES.md    Licenses of the libraries bundled in the full-score view
 ```
 
 ## License
 
-MIT (application code). The bundled `Sodor Grand` piano samples are the Salamander Grand Piano by Alessandro Iafrati, CC-BY-3.0.
+MIT (application code). The bundled `Sodor Grand` piano samples are the Salamander Grand Piano by Alessandro Iafrati, CC-BY-3.0. The libraries bundled in the full-score view keep their own licenses (BSD-3-Clause and MIT); see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
