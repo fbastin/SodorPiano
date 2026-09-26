@@ -1,13 +1,15 @@
 # Sodor Piano Studio
 
-A browser-based 88-key piano synthesizer with a realistic sampled grand piano, multiple sound presets, and MusicXML playback support. The **Sodor Grand** preset plays real recorded grand-piano samples; the other presets are generated in real time using the Web Audio API.
+A browser-based 88-key piano synthesizer with a realistic sampled grand piano, multiple sound presets, and playback of MusicXML and MuseScore scores. The **Sodor Grand** preset plays real recorded grand-piano samples; the other presets are generated in real time using the Web Audio API.
 
 ## Features
 
 - Full 88-key piano keyboard (A0 to C8)
 - 6 sound presets: Sodor Grand, Electric Whistle, Tidmouth Synth, Vicarstown Organ, Steam Whistle, Station Bell
-- Sodor Grand uses 30 recorded notes × 3 velocity layers from the Salamander Grand Piano library, with 3-layered dynamics, velocity touch, and sympathetic resonance
-- MusicXML file import and automated playback
+- Sodor Grand uses 30 recorded notes × 3 velocity layers from the Salamander Grand Piano library, with velocity touch, dampers that fall when a key is released (the top strings have none, as on a real grand), sympathetic resonance and a light room reverb
+- Score import and automated playback: MusicXML (`.musicxml`, `.xml`), compressed MusicXML (`.mxl`) and MuseScore 2, 3 and 4 files (`.mscz`, `.mscx`)
+- Repeats and first/second endings are played as written; tempo changes apply to every staff
+- Scores are performed with their dynamics, accents, staccato and tenuto marks, and sustain pedal; notes are scheduled on the audio clock, so chords sound together and the tempo never drifts
 - Touch and mouse input support
 
 ## Sound sources & credits
@@ -73,6 +75,14 @@ You can also use the `SodorPiano` class directly:
 </script>
 ```
 
+To load a score programmatically, pass a `File` or `Blob` in any supported format to `loadScoreFile`, then call `playScore`:
+
+```ts
+const piano = new SodorPiano(container);
+await piano.loadScoreFile(await (await fetch('song.mscz')).blob());
+piano.playScore();
+```
+
 ## Project structure
 
 ```
@@ -80,6 +90,10 @@ src/
   core/
     audio.ts          Audio synthesis engine (Web Audio API) + sample playback
     parser.ts         MusicXML parser
+    mscx.ts           MuseScore (.mscx) parser
+    timeline.ts       Repeat unrolling and tempo map shared by both parsers
+    zip.ts            ZIP reader for .mxl and .mscz archives
+    score-file.ts     Score file loader: detects the format from the content
   ui/
     piano-vanilla.ts  Self-contained piano UI component
   types.ts            Shared type definitions

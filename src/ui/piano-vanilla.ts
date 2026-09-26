@@ -1,8 +1,17 @@
 import { PianoAudio, SOUND_PRESETS } from '../core/audio';
 import { SoundType, MusicScore } from '../types';
 import { parseMusicXml } from '../core/parser';
+import { SCORE_FILE_TYPES, loadScoreFile } from '../core/score-file';
 
 const NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
+// Score playback scheduling: how often notes are queued, how far ahead of the
+// audio clock, and the silence before the first note.
+const SCHEDULE_INTERVAL_MS = 25;
+const SCHEDULE_AHEAD = 0.3;
+const SCHEDULE_LEAD_IN = 0.1;
+// Mezzo-forte, for scores that carry no velocity.
+const DEFAULT_SCORE_VELOCITY = 80 / 127;
 
 export class SodorPiano {
   private container: HTMLElement;
@@ -41,6 +50,18 @@ export class SodorPiano {
     }
   }
 
+  // MusicXML, compressed MusicXML (.mxl) or MuseScore (.mscz, .mscx).
+  public async loadScoreFile(file: Blob) {
+    try {
+      this.currentScore = await loadScoreFile(file);
+      this.updateUI();
+      return this.currentScore;
+    } catch (err) {
+      console.error('Failed to load score:', err);
+      throw err;
+    }
+  }
+
   public async playScore(score?: MusicScore) {
     const scoreToPlay = score || this.currentScore;
     if (!scoreToPlay || this.isAutoPlaying) return;
@@ -49,32 +70,51 @@ export class SodorPiano {
     this.stopAutoPlayRequested = false;
     this.updateUI();
 
-    for (let i = 0; i < scoreToPlay.notes.length; i++) {
-      if (this.stopAutoPlayRequested) break;
-      const note = scoreToPlay.notes[i];
-      this.playNote(note.keyIndex, (note.duration || 0.8) / this.tempoMultiplier, 0.75);
+    const notes = scoreToPlay.notes;
+    // Every sample is loaded before the first note: a sample fetched during
+    // playback would sound late.
+    if (this.soundType === 'grand') await this.audio.preloadGrand(notes);
 
-      const nextNote = scoreToPlay.notes[i + 1];
-      if (nextNote) {
-        const delay = (nextNote.time - note.time) * 1000 / this.tempoMultiplier;
-        await new Promise<void>(resolve => {
-            const check = setInterval(() => {
-                if (this.stopAutoPlayRequested) {
-                    clearTimeout(timer);
-                    clearInterval(check);
-                    resolve();
-                }
-            }, 50);
-            const timer = setTimeout(() => {
-                clearInterval(check);
-                resolve();
-            }, delay);
-        });
-      }
-    }
+    // Notes are scheduled slightly ahead on the audio clock, which is exact,
+    // rather than started by timers, which are not: chords then sound
+    // together and the tempo does not drift. The score clock follows the
+    // audio clock, scaled by the tempo setting, so that the setting can
+    // change during playback.
+    const lastRelease = Math.max(0, ...notes.map(n => n.time + (n.duration ?? 0.8)));
+    let scorePosition = -SCHEDULE_LEAD_IN;
+    let audioTime = this.audio.currentTime;
+    let next = 0;
 
+    await new Promise<void>(resolve => {
+      const tick = () => {
+        if (this.stopAutoPlayRequested) {
+          clearInterval(timer);
+          resolve();
+          return;
+        }
+        const now = this.audio.currentTime;
+        scorePosition += (now - audioTime) * this.tempoMultiplier;
+        audioTime = now;
+
+        const horizon = scorePosition + SCHEDULE_AHEAD * this.tempoMultiplier;
+        while (next < notes.length && notes[next].time <= horizon) {
+          const note = notes[next++];
+          const when = now + (note.time - scorePosition) / this.tempoMultiplier;
+          this.playNote(note.keyIndex, (note.duration || 0.8) / this.tempoMultiplier,
+                        note.velocity ?? DEFAULT_SCORE_VELOCITY, when);
+        }
+        if (next >= notes.length && scorePosition >= lastRelease) {
+          clearInterval(timer);
+          resolve();
+        }
+      };
+      const timer = setInterval(tick, SCHEDULE_INTERVAL_MS);
+      tick();
+    });
+
+    // A finished piece rings out; a stopped one is silenced.
+    if (this.stopAutoPlayRequested) this.audio.dampAll();
     this.isAutoPlaying = false;
-    this.audio.dampAll();
     this.updateUI();
   }
 
@@ -83,9 +123,15 @@ export class SodorPiano {
     this.audio.dampAll();
   }
 
-  public playNote(keyIndex: number, duration = 2.5, velocity = 0.8) {
-    this.audio.playNote(keyIndex, this.soundType, duration, velocity);
-    this.highlightKey(keyIndex);
+  // `when`, on the audio clock, schedules the note instead of playing it now.
+  public playNote(keyIndex: number, duration = 2.5, velocity = 0.8, when?: number) {
+    this.audio.playNote(keyIndex, this.soundType, duration, velocity, when);
+    if (when === undefined) {
+      this.highlightKey(keyIndex);
+    } else {
+      const delay = Math.max(0, (when - this.audio.currentTime) * 1000);
+      setTimeout(() => this.highlightKey(keyIndex), delay);
+    }
   }
 
   private highlightKey(keyIndex: number) {
@@ -469,7 +515,7 @@ export class SodorPiano {
                   <button class="sp-knob-btn" id="sp-tempo-up">+</button>
                 </div>
                 <div class="sp-action-group">
-                  <input type="file" id="sp-xml-import" style="display:none" accept=".musicxml,.xml">
+                  <input type="file" id="sp-xml-import" style="display:none" accept="${SCORE_FILE_TYPES}">
                   <button class="sp-btn sp-btn-pedal" id="sp-pedal-btn">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                       <path d="M4 10h16"/><path d="M6 10v6h4v-6"/><circle cx="18" cy="13" r="3"/><circle cx="18" cy="13" r="1" fill="currentColor" stroke="none"/>
@@ -535,15 +581,16 @@ export class SodorPiano {
     const stopBtn = this.container.querySelector('#sp-stop-btn') as HTMLButtonElement;
 
     importBtn.onclick = () => fileInput.click();
-    fileInput.onchange = (e: any) => {
+    fileInput.onchange = async (e: any) => {
       const file = e.target.files[0];
+      // Reset so that choosing the same file again still triggers a load.
+      fileInput.value = '';
       if (!file) return;
-      const reader = new FileReader();
-      reader.onload = async (event) => {
-        const xml = event.target?.result as string;
-        await this.loadMusicXml(xml);
-      };
-      reader.readAsText(file);
+      try {
+        await this.loadScoreFile(file);
+      } catch (err) {
+        alert(`Cannot read ${file.name}: ${err instanceof Error ? err.message : err}`);
+      }
     };
 
     playBtn.onclick = () => this.playScore();

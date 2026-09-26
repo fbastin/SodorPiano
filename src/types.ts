@@ -3,7 +3,8 @@ export type SoundType = 'grand' | 'electric' | 'synth' | 'organ' | 'whistle' | '
 export interface MusicNote {
   keyIndex: number;
   time: number; // in seconds
-  duration?: number;
+  duration?: number; // seconds until the key is released (the pedal may sustain it further)
+  velocity?: number; // 0–1
 }
 
 export interface MusicScore {

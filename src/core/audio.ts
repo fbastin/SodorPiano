@@ -92,18 +92,47 @@ export const SOUND_PRESETS: Record<SoundType, SoundPreset> = {
 interface ActiveVoice {
   keyIndex: number;
   gainNode: GainNode;
+  // Sampled notes end through a separate gain, the damper, so that damping
+  // never has to undo the note's own envelope — which may be scheduled in
+  // the future.
+  damper?: GainNode;
+  // A source accepts a single stop(): once scheduled, only the damper gain
+  // can end the sound earlier.
+  stopScheduled?: boolean;
+  // The damper's fall already scheduled, as an exponential ramp.
+  damping?: { from: number; at: number; end: number };
+  startTime: number;
   stopTime: number;
   oscillators: OscillatorNode[];
   sources: AudioBufferSourceNode[];
 }
 
+// Level treated as silence: -80 dB.
+const SILENT = 0.0001;
+
+// Keys from F#6 up have no damper on a grand piano: their strings ring on
+// after the key is released.
+const FIRST_UNDAMPED_KEY = 69;
+
+// Time constant of the damper falling on the strings: slower on the long,
+// heavy bass strings.
+const damperTime = (keyIndex: number) => keyIndex < 24 ? 0.15 : keyIndex < 48 ? 0.09 : 0.06;
+
+// Velocity layers of the samples, and the velocity each was recorded at.
+const LAYERS: { name: 'p' | 'm' | 'f'; below: number; reference: number }[] = [
+  { name: 'p', below: 0.42, reference: 0.3 },
+  { name: 'm', below: 0.72, reference: 0.57 },
+  { name: 'f', below: Infinity, reference: 0.85 },
+];
+
 export class PianoAudio {
   private ctx: AudioContext | null = null;
   private masterGainNode: GainNode | null = null;
   private compressor: DynamicsCompressorNode | null = null;
+  private reverb: ConvolverNode | null = null;
   private _volume = 0.8;
   private activeVoices: ActiveVoice[] = [];
-  private readonly maxPolyphony = 32;
+  private readonly maxPolyphony = 64;
   private _pedalDown = false;
   private resonanceInput: GainNode | null = null;
   private resonanceOutput: GainNode | null = null;
@@ -208,6 +237,16 @@ export class PianoAudio {
       this.masterGainNode.connect(this.compressor);
       this.compressor.connect(this.ctx.destination);
 
+      // A little room around the instrument: dry samples sound as if
+      // recorded with the microphones inside the piano.
+      this.reverb = this.ctx.createConvolver();
+      this.reverb.buffer = roomImpulse(this.ctx);
+      const wet = this.ctx.createGain();
+      wet.gain.setValueAtTime(0.5, this.ctx.currentTime);
+      this.masterGainNode.connect(this.reverb);
+      this.reverb.connect(wet);
+      wet.connect(this.compressor);
+
       this.initResonance(this.ctx);
     }
     if (this.ctx.state === 'suspended') {
@@ -220,7 +259,46 @@ export class PianoAudio {
     return this.masterGainNode!;
   }
 
-  private dampVoice(voice: ActiveVoice, when: number) {
+  /** Current time of the audio clock, starting the audio engine if needed. */
+  get currentTime(): number {
+    return this.initCtx().currentTime;
+  }
+
+  /** Loads the samples a list of notes will need, so that none arrives late. */
+  async preloadGrand(notes: { keyIndex: number; velocity?: number }[]) {
+    const ctx = this.initCtx();
+    const files = new Set(notes.map(n => this.grandSample(n.keyIndex, n.velocity ?? 0.8).file));
+    await Promise.allSettled([...files].map(f => this.loadSample(ctx, f)));
+  }
+
+  private dampVoice(voice: ActiveVoice, when: number, timeConstant = 0.012) {
+    if (voice.damper) {
+      // A note scheduled but not started yet is simply cut off from the output.
+      if (when < voice.startTime) {
+        voice.damper.disconnect();
+        voice.stopTime = when;
+        return;
+      }
+      // An exponential ramp down to -80 dB (about 9 time constants). Plain
+      // ramps rather than setTargetAtTime, whose handling varies between
+      // implementations; the level at `when` is therefore computed here.
+      const end = when + timeConstant * 9;
+      const prior = voice.damping;
+      if (prior && prior.at <= when && prior.end <= end) return;   // already falling faster
+      const from = !prior || when <= prior.at ? 1
+        : when >= prior.end ? SILENT
+        : prior.from * Math.pow(SILENT / prior.from, (when - prior.at) / (prior.end - prior.at));
+      voice.damper.gain.cancelScheduledValues(when);
+      voice.damper.gain.setValueAtTime(from, when);
+      voice.damper.gain.exponentialRampToValueAtTime(SILENT, end);
+      voice.damping = { from, at: when, end };
+      if (!voice.stopScheduled) {
+        voice.sources.forEach(s => { try { s.stop(end); } catch (_) {} });
+        voice.stopScheduled = true;
+      }
+      voice.stopTime = Math.min(voice.stopTime, end);
+      return;
+    }
     const fadeOut = 0.03;
     voice.gainNode.gain.cancelScheduledValues(when);
     const startGain = Math.max(voice.gainNode.gain.value, 0.0001);
@@ -283,29 +361,25 @@ export class PianoAudio {
     this.resonanceOutput.connect(this.masterGainNode!);
   }
 
-  private managePolyphony(ctx: AudioContext, keyIndex: number) {
-    const now = ctx.currentTime;
-
-    // Damp any existing voice on the same key
+  // `when` is the start of the new note, possibly slightly in the future.
+  private managePolyphony(ctx: AudioContext, keyIndex: number, when = ctx.currentTime) {
+    // Striking a key again silences its previous sound, though not abruptly:
+    // the hammer meets a string that is still vibrating.
     this.activeVoices = this.activeVoices.filter(v => {
-      if (v.keyIndex === keyIndex) {
-        this.dampVoice(v, now);
+      if (v.keyIndex === keyIndex && v.startTime <= when) {
+        this.dampVoice(v, when, 0.04);
         return false;
       }
       return true;
     });
 
-    // Remove expired voices
-    this.activeVoices = this.activeVoices.filter(v => {
-      if (v.stopTime > now) return true;
-      this.dampVoice(v, now);
-      return false;
-    });
+    // Forget voices that have finished
+    this.activeVoices = this.activeVoices.filter(v => v.stopTime > when);
 
     // If over polyphony limit, damp oldest voices
     while (this.activeVoices.length >= this.maxPolyphony) {
       const oldest = this.activeVoices.shift()!;
-      this.dampVoice(oldest, now);
+      this.dampVoice(oldest, when, 0.03);
     }
   }
 
@@ -313,18 +387,26 @@ export class PianoAudio {
     return 27.5 * Math.pow(2, keyIndex / 12);
   }
 
-  playNote(keyIndex: number, soundType: SoundType = 'grand', duration = 1.2, velocity = 0.9) {
+  /**
+   * Plays a note for `duration` seconds, the time the key (or the pedal)
+   * holds the damper off the strings. `when` schedules it on the audio clock;
+   * without it the note starts at once.
+   */
+  playNote(keyIndex: number, soundType: SoundType = 'grand', duration = 1.2, velocity = 0.9, when?: number) {
     const ctx = this.initCtx();
-    this.managePolyphony(ctx, keyIndex);
+    const start = Math.max(when ?? 0, ctx.currentTime);
+    this.managePolyphony(ctx, keyIndex, start);
     if (soundType === 'grand') {
-      this.playGrandPiano(ctx, keyIndex, duration, velocity).catch(err =>
+      // A key played by hand has no release event: it rings out naturally.
+      const ringOut = when === undefined && duration >= 2.0;
+      this.playGrandPiano(ctx, keyIndex, duration, velocity, start, ringOut).catch(err =>
         console.error('[SodorPiano] grand note error:', err)
       );
       return;
     }
 
     const preset = SOUND_PRESETS[soundType];
-    const now = ctx.currentTime;
+    const now = start;
     const freq = this.getFrequency(keyIndex);
     const hasPerOscEnvelope = !!preset.decayRates;
 
@@ -382,6 +464,7 @@ export class PianoAudio {
       noiseSource.stop(now + 0.05);
     }
 
+    const oscillators: OscillatorNode[] = [];
     preset.oscTypes.forEach((type, i) => {
       const osc = ctx.createOscillator();
       const oscGain = ctx.createGain();
@@ -410,20 +493,35 @@ export class PianoAudio {
 
       osc.start(now);
       osc.stop(now + duration + preset.release);
+      oscillators.push(osc);
+    });
+
+    this.activeVoices.push({
+      keyIndex,
+      gainNode: masterGain,
+      startTime: now,
+      stopTime: now + duration + preset.release,
+      oscillators,
+      sources: [],
     });
   }
 
-  private async playGrandPiano(ctx: AudioContext, keyIndex: number, duration: number, velocity = 0.9) {
+  // Sample file and playback rate for a key at a given velocity.
+  private grandSample(keyIndex: number, velocity: number) {
+    const entry = PianoAudio.GRAND_SAMPLE_MAP[keyIndex] || PianoAudio.GRAND_SAMPLE_MAP[39];
+    const layer = LAYERS.find(l => velocity < l.below)!;
+    // '#' is a URL fragment separator, so sharps are stored as 's' in filenames.
+    const file = `${entry.note.replace('#', 's')}_${layer.name}.mp3`;
+    return { file, rate: entry.rate, layer };
+  }
+
+  private async playGrandPiano(ctx: AudioContext, keyIndex: number, duration: number,
+                               velocity: number, when: number, ringOut: boolean) {
     if (!this.ctx || this.ctx.state === 'closed') return;
     const nodeCtx = this.ctx;
 
     const vel = Math.max(0.05, Math.min(1, velocity));
-    const entry = PianoAudio.GRAND_SAMPLE_MAP[keyIndex] || PianoAudio.GRAND_SAMPLE_MAP[39];
-    // Map velocity to a recorded layer: p (soft), m (medium), f (forte).
-    const layer = vel >= 0.75 ? 'f' : vel >= 0.4 ? 'm' : 'p';
-    // '#' is a URL fragment separator, so sharps are stored as 's' in filenames.
-    const noteSafe = entry.note.replace('#', 's');
-    const file = `${noteSafe}_${layer}.mp3`;
+    const { file, rate, layer } = this.grandSample(keyIndex, vel);
 
     let buffer: AudioBuffer;
     try {
@@ -434,20 +532,24 @@ export class PianoAudio {
       return;
     }
 
-    // Re-read the clock after the async sample load so all scheduling uses a
-    // current timestamp (the one captured above may be stale by now).
-    const start = nodeCtx.currentTime;
+    // A sample that had to be fetched first starts late rather than in the past.
+    const start = Math.max(when, nodeCtx.currentTime);
 
     const source = nodeCtx.createBufferSource();
     source.buffer = buffer;
-    source.playbackRate.setValueAtTime(entry.rate, start);
+    source.playbackRate.setValueAtTime(rate, start);
 
+    // Each layer is a recording at one velocity; within it, the level follows
+    // the velocity so that dynamics change smoothly from layer to layer.
+    // The recording itself carries the decay of the strings: the envelope
+    // only softens the attack.
     const noteGain = nodeCtx.createGain();
-    // Layer + velocity level; slightly taper so very soft keystrokes stay soft.
-    const layerGain = layer === 'p' ? 0.7 : layer === 'm' ? 0.85 : 1.0;
-    const peak = layerGain * (0.55 + 0.45 * vel);
+    const peak = 0.9 * Math.min(1.4, Math.max(0.5, vel / layer.reference));
     noteGain.gain.setValueAtTime(0, start);
     noteGain.gain.linearRampToValueAtTime(peak, start + 0.003);
+
+    const damper = nodeCtx.createGain();
+    damper.gain.setValueAtTime(1, start);
 
     // Body resonance: samples are already full grands, just add a light presence
     // boost and a gentle high-frequency roll-off towards the top to soften it.
@@ -459,7 +561,8 @@ export class PianoAudio {
     body.gain.setValueAtTime(freq < 200 ? 2.0 : 1.2, start);
 
     source.connect(noteGain);
-    noteGain.connect(body);
+    noteGain.connect(damper);
+    damper.connect(body);
     body.connect(this.output);
 
     // Sympathetic resonance when pedal is down or other notes are ringing.
@@ -471,24 +574,24 @@ export class PianoAudio {
       excite.connect(this.resonanceInput);
     }
 
-    // Natural playback length; let held notes ring out, cut short articulated ones.
-    const naturalDur = buffer.duration / entry.rate;
-    const held = duration >= 2.0;
-    const endTime = start + (held ? naturalDur : Math.max(0.05, duration));
-    const release = Math.min(0.8, Math.max(0.25, duration * 0.25));
-    const stopTime = endTime + release;
-
-    source.start(start);
-    noteGain.gain.exponentialRampToValueAtTime(0.0001, endTime + release);
-    source.stop(stopTime + 0.02);
-
-    this.activeVoices.push({
+    const naturalEnd = start + buffer.duration / rate;
+    const voice: ActiveVoice = {
       keyIndex,
       gainNode: noteGain,
-      stopTime,
+      damper,
+      startTime: start,
+      stopTime: naturalEnd,
       oscillators: [],
       sources: [source],
-    });
+    };
+    // No stop() here: the recording ends by itself, and the damper below
+    // may need the source's only stop().
+    source.start(start);
+    // The damper falls when the key is released, unless the string has none.
+    if (!ringOut && keyIndex < FIRST_UNDAMPED_KEY) {
+      this.dampVoice(voice, start + Math.max(0.03, duration), damperTime(keyIndex));
+    }
+    this.activeVoices.push(voice);
   }
 
   // Emergency additive tone, only used if a sample fails to load so the app is
@@ -522,6 +625,7 @@ export class PianoAudio {
     this.activeVoices.push({
       keyIndex,
       gainNode: masterGain,
+      startTime: now,
       stopTime: now + duration + 0.35,
       oscillators,
       sources: [],
@@ -539,6 +643,29 @@ export class PianoAudio {
       this.ctx.close();
       this.ctx = null;
       this.compressor = null;
+      this.reverb = null;
     }
   }
+}
+
+// Impulse response of a small, warm room: decorrelated noise in each channel,
+// decaying over about 1.6 s, and darkening as it decays (high frequencies die
+// out first in a real room).
+function roomImpulse(ctx: AudioContext): AudioBuffer {
+  const rt60 = 1.6;
+  const preDelay = Math.floor(0.012 * ctx.sampleRate);
+  const length = Math.floor(rt60 * ctx.sampleRate);
+  const impulse = ctx.createBuffer(2, length, ctx.sampleRate);
+  for (let ch = 0; ch < 2; ch++) {
+    const data = impulse.getChannelData(ch);
+    let smoothed = 0;
+    for (let i = preDelay; i < length; i++) {
+      const t = (i - preDelay) / ctx.sampleRate;
+      // One-pole low-pass whose cutoff falls with time.
+      const coeff = 0.25 + 0.7 * Math.min(1, t / rt60);
+      smoothed = coeff * smoothed + (1 - coeff) * (Math.random() * 2 - 1);
+      data[i] = smoothed * Math.exp(-6.9 * t / rt60);
+    }
+  }
+  return impulse;
 }
