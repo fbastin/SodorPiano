@@ -11,6 +11,7 @@ A browser-based 88-key piano synthesizer with a realistic sampled grand piano, m
 - Repeats (nested ones included), first/second endings, and the road map (D.C., D.S., al Fine, al Coda, section breaks) are played as MuseScore plays them; tempo changes apply to every staff
 - Scores are performed with their dynamics and hairpins (crescendo, decrescendo), accents, staccato and tenuto marks, and sustain pedal; notes are scheduled on the audio clock, so chords sound together and the tempo never drifts
 - A scrolling view above the keyboard follows the score as it plays: either a simple grand staff (notes placed by time, also showing the notes played by hand) or the full score, engraved with OpenSheetMusicDisplay (loaded on demand; MuseScore files are converted to MusicXML for it). It can be hidden for small screens
+- A score can be opened from a link: `index.html?score=/path/to/piece.mscz` loads it, ready to play (files on the same site only)
 - Volume, tempo (0.25× to 2×) and sustain pedal controls; a key struck near its front sounds louder than one grazed at the top
 - Touch and mouse input support
 
@@ -126,6 +127,7 @@ src/
                           dynamics and hairpins, pedal, ties
     zip.ts                ZIP reader for .mxl and .mscz archives
     score-file.ts         Score file loader: detects the format from the content
+    score-url.ts          Score named in the page address (?score=…), same site only
   ui/
     piano-vanilla.ts      Self-contained piano UI component
     staff.ts              Simple scrolling grand staff (canvas)
