@@ -136,6 +136,8 @@ src/
   main.ts                 Application entry point
   index.ts                Library barrel export
 index.src.html            Source page (Vite entry)
+index.php                 Presentation page on slashbin.net, drawn from README.md
+                          (English) or README.fr.md (French)
 index.html                Built page, served (build output — see npm run deploy)
 assets/                   Built bundles (build output) and samples/, the Salamander
                           Grand Piano samples (see samples/samples-LICENSE.txt)
