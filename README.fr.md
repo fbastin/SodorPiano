@@ -6,7 +6,7 @@ La documentation technique (installation, déploiement, tests, intégration) est
 
 ## Fonctionnalités
 
-- Clavier complet de 88 touches (du la0 au do8)
+- Clavier complet de 88 touches (de A0 à C8, soit du la−1 au do7 en notation française)
 - 6 sons : Sodor Grand, Electric Whistle, Tidmouth Synth, Vicarstown Organ, Steam Whistle, Station Bell
 - Sodor Grand joue 30 notes enregistrées × 3 niveaux de nuance, tirées de la bibliothèque Salamander Grand Piano, avec sensibilité au toucher, des étouffoirs qui retombent au relâchement de la touche (les cordes les plus aiguës n'en ont pas, comme sur un vrai piano à queue), la résonance sympathique et une légère réverbération de salle
 - Import et lecture automatique des partitions : MusicXML (`.musicxml`, `.xml`), MusicXML compressé (`.mxl`) et fichiers MuseScore 2, 3 et 4 (`.mscz`, `.mscx`)
